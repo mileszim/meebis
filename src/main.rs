@@ -39,6 +39,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 struct Config {
     bind: String,
     port: u16,
+    port_file: Option<String>,
     requirepass: Option<String>,
     maxclients: usize,
 }
@@ -53,6 +54,8 @@ USAGE:
 OPTIONS:
     -p, --port <PORT>          Port to listen on (default: 6379)
         --bind <ADDR>          Address to bind (default: 127.0.0.1)
+        --port-file <PATH>     Write the actual listen port to <PATH> on boot
+                               (useful with --port 0, so tooling can find it)
         --requirepass <PASS>   Require AUTH with this password
         --maxclients <N>       Maximum simultaneous connections (default: 10000)
     -h, --help                 Print this help
@@ -68,6 +71,7 @@ fn parse_args() -> Result<Config, i32> {
     let mut cfg = Config {
         bind: "127.0.0.1".to_string(),
         port: 6379,
+        port_file: None,
         requirepass: None,
         maxclients: 10000,
     };
@@ -96,6 +100,13 @@ fn parse_args() -> Result<Config, i32> {
                     return Err(1);
                 }
             },
+            "--port-file" => match args.next() {
+                Some(p) => cfg.port_file = Some(p),
+                None => {
+                    eprintln!("meebis: --port-file requires a path");
+                    return Err(1);
+                }
+            },
             "--requirepass" => match args.next() {
                 Some(p) => cfg.requirepass = Some(p),
                 None => {
@@ -117,6 +128,19 @@ fn parse_args() -> Result<Config, i32> {
         }
     }
     Ok(cfg)
+}
+
+/// Write the resolved listen `port` to `path` so other processes can discover
+/// it — mainly useful with `--port 0`, where the OS picks the port. Written via
+/// a temp file + rename so a concurrent reader never sees a half-written value;
+/// (over)written fresh on each boot, so a stale file from a prior run is
+/// replaced rather than trusted.
+fn write_port_file(path: &str, port: u16) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = format!("{path}.tmp");
+    let mut f = std::fs::File::create(&tmp)?;
+    writeln!(f, "{port}")?;
+    std::fs::rename(&tmp, path)
 }
 
 fn main() {
@@ -148,6 +172,15 @@ async fn run(cfg: Config) -> std::io::Result<()> {
         .map_err(|e| std::io::Error::new(e.kind(), format!("could not bind {bind_addr}: {e}")))?;
     // Resolve the actual port (matters when --port 0 asks the OS to pick one).
     let local_addr = listener.local_addr()?;
+
+    // Publish the bound port for tooling to discover. A failure here is not
+    // fatal — the server still works — but warn so a broken integration is
+    // visible rather than silently hanging on a missing file.
+    if let Some(path) = &cfg.port_file {
+        if let Err(e) = write_port_file(path, local_addr.port()) {
+            eprintln!("meebis: could not write --port-file {path}: {e}");
+        }
+    }
 
     let shared = Arc::new(Shared::new(
         cfg.requirepass,
