@@ -41,8 +41,14 @@ jobs:
 
       # The compatibility suite diffs meebis against the real Redis server,
       # command-for-command, so a regression against the Redis spec fails CI.
+      # Pin the reference to Redis 7.2 rather than apt's 7.0.x: OBJECT ENCODING
+      # for lists is version-sensitive (small lists report `listpack` on 7.2+
+      # but `quicklist` on 7.0), and meebis targets the modern 7.2 encodings.
       - name: Install reference Redis
-        run: sudo apt-get update && sudo apt-get install -y redis-server redis-tools
+        uses: shogo82148/actions-setup-redis@v1
+        with:
+          redis-version: '7.2'
+          auto-start: 'false'
 
       - name: Set up Python (for the RESP3 parity check)
         uses: actions/setup-python@v5
