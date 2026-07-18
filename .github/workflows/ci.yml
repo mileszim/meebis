@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test & Redis-spec compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Unit tests
+        run: cargo test --all
+
+      - name: Build release
+        run: cargo build --release
+
+      # The compatibility suite diffs meebis against the real Redis server,
+      # command-for-command, so a regression against the Redis spec fails CI.
+      - name: Install reference Redis
+        run: sudo apt-get update && sudo apt-get install -y redis-server redis-tools
+
+      - name: Set up Python (for the RESP3 parity check)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install redis-py
+        run: pip install redis
+
+      - name: Redis compatibility suite
+        run: bash tests/compat/run.sh ./target/release/meebis

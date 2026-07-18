@@ -46,9 +46,7 @@ pub fn auth(shared: &Shared, conn: &mut ConnState, args: &[Bytes]) -> Frame {
                 conn.authenticated = true;
                 Frame::ok()
             } else {
-                Frame::Error(
-                    "WRONGPASS invalid username-password pair or user is disabled.".into(),
-                )
+                Frame::Error("WRONGPASS invalid username-password pair or user is disabled.".into())
             }
         }
     }
@@ -128,7 +126,10 @@ pub fn hello(shared: &Shared, conn: &mut ConnState, args: &[Bytes]) -> Frame {
     Frame::Map(vec![
         (Frame::bulk("server"), Frame::bulk("redis")),
         (Frame::bulk("version"), Frame::bulk("7.4.0")),
-        (Frame::bulk("proto"), Frame::Integer(if conn.resp3 { 3 } else { 2 })),
+        (
+            Frame::bulk("proto"),
+            Frame::Integer(if conn.resp3 { 3 } else { 2 }),
+        ),
         (Frame::bulk("id"), Frame::Integer(conn.id as i64)),
         (Frame::bulk("mode"), Frame::bulk("standalone")),
         (Frame::bulk("role"), Frame::bulk("master")),
@@ -148,7 +149,9 @@ pub fn client(shared: &Shared, conn: &mut ConnState, args: &[Bytes]) -> Frame {
                 return wrong_args("client|setname");
             }
             if args[2].iter().any(|&b| b == b' ' || b == b'\n') {
-                return Frame::err("Client names cannot contain spaces, newlines or special characters.");
+                return Frame::err(
+                    "Client names cannot contain spaces, newlines or special characters.",
+                );
             }
             conn.name = args[2].clone();
             update_registry_name(shared, conn);

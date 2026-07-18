@@ -237,9 +237,7 @@ impl Db {
                 4u8.hash(&mut h);
                 z.len().hash(&mut h);
                 let fold = z.scores.iter().fold(0u64, |acc, (m, score)| {
-                    acc ^ hash_one(m)
-                        .wrapping_mul(31)
-                        .wrapping_add(score.to_bits())
+                    acc ^ hash_one(m).wrapping_mul(31).wrapping_add(score.to_bits())
                 });
                 fold.hash(&mut h);
             }
@@ -279,10 +277,7 @@ impl Db {
         }
     }
 
-    pub fn get_list_mut(
-        &mut self,
-        key: &[u8],
-    ) -> Result<Option<&mut VecDeque<Bytes>>, WrongType> {
+    pub fn get_list_mut(&mut self, key: &[u8]) -> Result<Option<&mut VecDeque<Bytes>>, WrongType> {
         match self.get_mut(key) {
             None => Ok(None),
             Some(Value::List(l)) => Ok(Some(l)),
@@ -290,10 +285,7 @@ impl Db {
         }
     }
 
-    pub fn get_or_create_list(
-        &mut self,
-        key: Bytes,
-    ) -> Result<&mut VecDeque<Bytes>, WrongType> {
+    pub fn get_or_create_list(&mut self, key: Bytes) -> Result<&mut VecDeque<Bytes>, WrongType> {
         self.purge_if_expired(&key);
         match self
             .data
@@ -441,7 +433,8 @@ impl ZSet {
 
     pub fn remove(&mut self, member: &[u8]) -> bool {
         if let Some(score) = self.scores.remove(member) {
-            self.sorted.remove(&(OrdF64(score), Bytes::copy_from_slice(member)));
+            self.sorted
+                .remove(&(OrdF64(score), Bytes::copy_from_slice(member)));
             true
         } else {
             false
@@ -585,11 +578,17 @@ mod tests {
         z.insert(Bytes::from("a"), 1.0);
         z.insert(Bytes::from("c"), 2.0);
         let order: Vec<_> = z.iter_asc().map(|(m, _)| m.clone()).collect();
-        assert_eq!(order, vec![Bytes::from("a"), Bytes::from("b"), Bytes::from("c")]);
+        assert_eq!(
+            order,
+            vec![Bytes::from("a"), Bytes::from("b"), Bytes::from("c")]
+        );
         assert_eq!(z.rank(b"c"), Some(2));
         z.insert(Bytes::from("a"), 5.0); // move a to the end
         let order: Vec<_> = z.iter_asc().map(|(m, _)| m.clone()).collect();
-        assert_eq!(order, vec![Bytes::from("b"), Bytes::from("c"), Bytes::from("a")]);
+        assert_eq!(
+            order,
+            vec![Bytes::from("b"), Bytes::from("c"), Bytes::from("a")]
+        );
     }
 
     #[test]

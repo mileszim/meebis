@@ -143,9 +143,9 @@ async fn run(cfg: Config) -> std::io::Result<()> {
     let start = Instant::now();
 
     let bind_addr = format!("{}:{}", cfg.bind, cfg.port);
-    let listener = TcpListener::bind(&bind_addr).await.map_err(|e| {
-        std::io::Error::new(e.kind(), format!("could not bind {bind_addr}: {e}"))
-    })?;
+    let listener = TcpListener::bind(&bind_addr)
+        .await
+        .map_err(|e| std::io::Error::new(e.kind(), format!("could not bind {bind_addr}: {e}")))?;
     // Resolve the actual port (matters when --port 0 asks the OS to pick one).
     let local_addr = listener.local_addr()?;
 
@@ -225,8 +225,7 @@ async fn handle_connection(
     };
     if over_limit {
         let mut out = BytesMut::new();
-        resp::Frame::Error("ERR max number of clients reached".into())
-            .encode(false, &mut out);
+        resp::Frame::Error("ERR max number of clients reached".into()).encode(false, &mut out);
         let _ = stream.write_all(&out).await;
         return Ok(());
     }

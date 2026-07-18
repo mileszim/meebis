@@ -42,13 +42,7 @@ macro_rules! db {
 fn allowed_in_subscribe(name: &str) -> bool {
     matches!(
         name,
-        "SUBSCRIBE"
-            | "UNSUBSCRIBE"
-            | "PSUBSCRIBE"
-            | "PUNSUBSCRIBE"
-            | "PING"
-            | "QUIT"
-            | "RESET"
+        "SUBSCRIBE" | "UNSUBSCRIBE" | "PSUBSCRIBE" | "PUNSUBSCRIBE" | "PING" | "QUIT" | "RESET"
     )
 }
 
@@ -63,9 +57,7 @@ pub fn handle(shared: &Shared, conn: &mut ConnState, args: Vec<Bytes>) -> Reply 
         && !conn.authenticated
         && !matches!(name.as_str(), "AUTH" | "HELLO" | "QUIT" | "RESET")
     {
-        return Reply::One(Frame::Error(
-            "NOAUTH Authentication required.".into(),
-        ));
+        return Reply::One(Frame::Error("NOAUTH Authentication required.".into()));
     }
 
     // In RESP2 subscribe mode, only a handful of commands are legal.
@@ -344,9 +336,7 @@ fn exec(shared: &Shared, conn: &mut ConnState) -> Frame {
 
     if conn.multi_error {
         conn.multi_error = false;
-        return Frame::Error(
-            "EXECABORT Transaction discarded because of previous errors.".into(),
-        );
+        return Frame::Error("EXECABORT Transaction discarded because of previous errors.".into());
     }
 
     // Abort if any watched key changed since it was watched.
@@ -414,13 +404,12 @@ fn subscribe(shared: &Shared, conn: &mut ConnState, args: &[Bytes], pattern: boo
     out
 }
 
-fn unsubscribe(
-    shared: &Shared,
-    conn: &mut ConnState,
-    args: &[Bytes],
-    pattern: bool,
-) -> Vec<Frame> {
-    let kind = if pattern { "punsubscribe" } else { "unsubscribe" };
+fn unsubscribe(shared: &Shared, conn: &mut ConnState, args: &[Bytes], pattern: bool) -> Vec<Frame> {
+    let kind = if pattern {
+        "punsubscribe"
+    } else {
+        "unsubscribe"
+    };
     // Determine the targets: explicit list, or everything currently subscribed.
     let targets: Vec<Bytes> = if args.len() > 1 {
         args[1..].to_vec()
@@ -490,7 +479,10 @@ fn pubsub_cmd(shared: &Shared, args: &[Bytes]) -> Frame {
             Frame::Array(out)
         }
         "NUMPAT" => Frame::Integer(shared.pubsub.numpat()),
-        other => Frame::err(format!("Unknown PUBSUB subcommand '{}'", other.to_lowercase())),
+        other => Frame::err(format!(
+            "Unknown PUBSUB subcommand '{}'",
+            other.to_lowercase()
+        )),
     }
 }
 

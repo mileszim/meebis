@@ -46,12 +46,22 @@ pub fn pop(db: &mut Db, args: &[Bytes], left: bool) -> Frame {
 
     let list = match db.get_list_mut(&args[1]) {
         Ok(Some(l)) => l,
-        Ok(None) => return if count.is_some() { Frame::NullArray } else { Frame::Null },
+        Ok(None) => {
+            return if count.is_some() {
+                Frame::NullArray
+            } else {
+                Frame::Null
+            }
+        }
         Err(_) => return Frame::wrongtype(),
     };
 
     let result = match count {
-        None => match if left { list.pop_front() } else { list.pop_back() } {
+        None => match if left {
+            list.pop_front()
+        } else {
+            list.pop_back()
+        } {
             Some(v) => Frame::Bulk(v),
             None => Frame::Null,
         },
@@ -59,7 +69,11 @@ pub fn pop(db: &mut Db, args: &[Bytes], left: bool) -> Frame {
             let take = n.min(list.len());
             let mut out = Vec::with_capacity(take);
             for _ in 0..take {
-                let v = if left { list.pop_front() } else { list.pop_back() };
+                let v = if left {
+                    list.pop_front()
+                } else {
+                    list.pop_back()
+                };
                 if let Some(v) = v {
                     out.push(Frame::Bulk(v));
                 }
@@ -127,7 +141,10 @@ pub fn lindex(db: &mut Db, args: &[Bytes]) -> Frame {
             if i < 0 {
                 Frame::Null
             } else {
-                l.get(i as usize).cloned().map(Frame::Bulk).unwrap_or(Frame::Null)
+                l.get(i as usize)
+                    .cloned()
+                    .map(Frame::Bulk)
+                    .unwrap_or(Frame::Null)
             }
         }
         Ok(None) => Frame::Null,
@@ -176,7 +193,11 @@ pub fn lrem(db: &mut Db, args: &[Bytes]) -> Frame {
     let mut removed = 0i64;
     if count >= 0 {
         // Front-to-back; count 0 means "all".
-        let limit = if count == 0 { usize::MAX } else { count as usize };
+        let limit = if count == 0 {
+            usize::MAX
+        } else {
+            count as usize
+        };
         let mut i = 0;
         while i < list.len() && removed < limit as i64 {
             if list[i] == *target {
@@ -299,7 +320,13 @@ pub fn lpos(db: &mut Db, args: &[Bytes]) -> Frame {
 
     let list = match db.get_list(&args[1]) {
         Ok(Some(l)) => l,
-        Ok(None) => return if count.is_some() { Frame::Array(vec![]) } else { Frame::Null },
+        Ok(None) => {
+            return if count.is_some() {
+                Frame::Array(vec![])
+            } else {
+                Frame::Null
+            }
+        }
         Err(_) => return Frame::wrongtype(),
     };
 
@@ -338,7 +365,10 @@ pub fn lpos(db: &mut Db, args: &[Bytes]) -> Frame {
 
     match count {
         Some(_) => Frame::Array(found.into_iter().map(Frame::Integer).collect()),
-        None => found.first().map(|&i| Frame::Integer(i)).unwrap_or(Frame::Null),
+        None => found
+            .first()
+            .map(|&i| Frame::Integer(i))
+            .unwrap_or(Frame::Null),
     }
 }
 

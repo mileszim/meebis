@@ -9,8 +9,8 @@ exit. There is no persistence, no config file, and nothing to clean up.
 
 - **Fast** — matches real Redis throughput (~110–130k ops/sec single-threaded,
   sub-millisecond latency).
-- **Tiny** — an 850 KB binary using ~2 MB RAM per instance idle, so you can run
-  dozens at once without noticing.
+- **Tiny** — a sub-1 MB binary using ~2 MB RAM per instance idle, so you can run
+  dozens at once without noticing (see [Footprint & performance](#footprint--performance)).
 - **Compatible** — speaks RESP2 and RESP3 and a broad slice of the Redis
   command surface. `redis-cli`, `redis-py`, and other standard client libraries
   just work, verified byte-for-byte against Redis 7.2.
@@ -115,6 +115,38 @@ default RESP3, or `redis-cli`'s RESP2) work without configuration.
 
 `WATCH` is implemented by fingerprinting watched keys and aborting `EXEC` if any
 changed — correct for optimistic-locking patterns, without per-key versioning.
+
+## Footprint & performance
+
+meebis is built to be cheap enough to run many instances at once. Measured with
+a `--release` build on an Apple Silicon laptop (12 cores):
+
+| Metric | meebis | Notes |
+|--------|--------|-------|
+| Binary size | ~860 KB | one small binary, stripped |
+| Idle memory (RSS) | ~2 MB per instance | one OS thread per process |
+| 20 instances at once | ~40 MB total | dozens is a non-issue |
+| Throughput | ~110–130k ops/sec | `redis-benchmark -n 100000 -c 50` |
+| Latency | ~0.2 ms p50 | |
+
+Command throughput and latency track real Redis 7.2 on the same machine — both
+execute commands on a single thread — so meebis is not a local-dev bottleneck.
+A side-by-side `redis-benchmark` run:
+
+```
+              meebis        redis 7.2
+SET       121,212 rps      118,906 rps
+GET       114,025 rps      123,001 rps
+INCR      111,857 rps      125,471 rps
+RPUSH     126,422 rps      123,305 rps
+SADD      128,041 rps      123,001 rps
+HSET      116,959 rps      104,822 rps
+ZADD      121,951 rps      113,250 rps
+```
+
+Absolute numbers vary with hardware; the point is that the memory footprint
+stays flat whether you run one instance or twenty, and speed is on par with
+Redis itself.
 
 ## How it works
 

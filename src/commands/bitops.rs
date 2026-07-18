@@ -195,13 +195,25 @@ pub fn bitop(db: &mut Db, args: &[Bytes]) -> Frame {
 
     let result: Vec<u8> = match op.as_str() {
         "AND" => (0..maxlen)
-            .map(|i| sources.iter().fold(0xffu8, |acc, s| acc & s.get(i).copied().unwrap_or(0)))
+            .map(|i| {
+                sources
+                    .iter()
+                    .fold(0xffu8, |acc, s| acc & s.get(i).copied().unwrap_or(0))
+            })
             .collect(),
         "OR" => (0..maxlen)
-            .map(|i| sources.iter().fold(0u8, |acc, s| acc | s.get(i).copied().unwrap_or(0)))
+            .map(|i| {
+                sources
+                    .iter()
+                    .fold(0u8, |acc, s| acc | s.get(i).copied().unwrap_or(0))
+            })
             .collect(),
         "XOR" => (0..maxlen)
-            .map(|i| sources.iter().fold(0u8, |acc, s| acc ^ s.get(i).copied().unwrap_or(0)))
+            .map(|i| {
+                sources
+                    .iter()
+                    .fold(0u8, |acc, s| acc ^ s.get(i).copied().unwrap_or(0))
+            })
             .collect(),
         "NOT" => sources[0].iter().map(|b| !b).collect(),
         _ => return Frame::err("syntax error"),

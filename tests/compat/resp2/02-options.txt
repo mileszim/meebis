@@ -1,0 +1,43 @@
+FLUSHALL
+SET k v EX 100
+TTL k
+SET k v2 KEEPTTL
+TTL k
+SET k v3
+TTL k
+SET k v4 XX
+GET k
+SET nope v NX
+GET nope
+SET nope v2 NX
+GET nope
+SET k newv GET
+SET counter 5 GET
+SETEX se 100 hello
+TTL se
+GET se
+SET gx val
+GETEX gx EX 50
+TTL gx
+GETEX gx PERSIST
+TTL gx
+ZADD lex 0 a 0 b 0 c 0 d 0 e
+ZRANGEBYLEX lex - +
+ZRANGEBYLEX lex [b [d
+ZRANGEBYLEX lex (b (d
+ZRANGEBYLEX lex - (c
+ZREVRANGEBYLEX lex + -
+ZREVRANGEBYLEX lex [d (a
+ZLEXCOUNT lex - +
+ZLEXCOUNT lex [b [d
+ZRANGE lex (b (d BYLEX
+ZRANGE lex [a [c BYLEX
+OBJECT ENCODING counter
+SET longstr aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+OBJECT ENCODING longstr
+SET shortstr hello
+OBJECT ENCODING shortstr
+RPUSH lst a b c
+OBJECT ENCODING lst
+OBJECT ENCODING nokey
+OBJECT REFCOUNT nokey

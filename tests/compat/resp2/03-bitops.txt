@@ -1,0 +1,38 @@
+FLUSHALL
+SETBIT b 7 1
+GET b
+SETBIT b 0 1
+GETBIT b 0
+GETBIT b 7
+GETBIT b 3
+GETBIT b 100
+SETBIT b 100 1
+STRLEN b
+SET bc foobar
+BITCOUNT bc
+BITCOUNT bc 0 0
+BITCOUNT bc 1 1
+BITCOUNT bc 0 -1
+BITCOUNT bc 0 5 BIT
+BITCOUNT bc 5 30 BIT
+SET bp "\xff\xf0\x00"
+BITPOS bp 0
+BITPOS bp 1
+SET bp2 "\x00\x0f\xff"
+BITPOS bp2 1
+BITPOS bp2 1 2
+BITPOS bp2 1 0 -1 BIT
+SET x abc
+SET y abd
+BITOP AND destand x y
+GET destand
+BITOP OR destor x y
+GET destor
+BITOP XOR destxor x y
+GET destxor
+BITOP NOT destnot x
+STRLEN destnot
+GETBIT nokey 0
+BITCOUNT nokey
+BITPOS nokey 0
+BITPOS nokey 1

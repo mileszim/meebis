@@ -1,0 +1,154 @@
+FLUSHALL
+SET s hello
+GET s
+APPEND s world
+STRLEN s
+GETRANGE s 0 4
+GETRANGE s -5 -1
+SETRANGE s 5 XYZ
+GET s
+SET n 100
+INCR n
+DECR n
+INCRBY n 10
+DECRBY n 5
+INCRBYFLOAT n 1.5
+GET n
+SET f 3.0e3
+INCRBYFLOAT f 200
+GETSET s newval
+GET s
+GETDEL s
+EXISTS s
+SETNX k1 a
+SETNX k1 b
+GET k1
+MSET a 1 b 2 c 3
+MGET a b c nope
+MSETNX d 4 a 5
+GET d
+INCR k1
+LPUSH mylist c b a
+RPUSH mylist d e
+LRANGE mylist 0 -1
+LLEN mylist
+LINDEX mylist 0
+LINDEX mylist -1
+LINDEX mylist 100
+LSET mylist 0 A
+LRANGE mylist 0 0
+LPOP mylist
+RPOP mylist
+LPOP mylist 2
+RPUSH nums 1 2 3 2 1 2
+LREM nums 2 2
+LRANGE nums 0 -1
+LREM nums -1 1
+LRANGE nums 0 -1
+LINSERT nums BEFORE 3 X
+LRANGE nums 0 -1
+LPOS nums 2
+LTRIM nums 1 2
+LRANGE nums 0 -1
+RPOPLPUSH nums dst
+LRANGE dst 0 -1
+LMOVE nums dst LEFT RIGHT
+LRANGE dst 0 -1
+HSET h f1 v1 f2 v2 f3 v3
+HGET h f2
+HMGET h f1 f3 nope
+HEXISTS h f1
+HEXISTS h zzz
+HLEN h
+HSTRLEN h f1
+HINCRBY h cnt 5
+HINCRBY h cnt 3
+HINCRBYFLOAT h fl 2.5
+HDEL h f1 f2
+HLEN h
+HSETNX h f3 nope
+HSETNX h f9 yes
+HGET h f9
+SADD myset a b c d
+SCARD myset
+SISMEMBER myset a
+SISMEMBER myset z
+SMISMEMBER myset a z c
+SREM myset a
+SCARD myset
+SADD other b c x
+SINTERSTORE inter myset other
+SCARD inter
+SUNIONSTORE uni myset other
+SCARD uni
+SDIFFSTORE diff myset other
+SCARD diff
+SINTERCARD 2 myset other
+SMOVE myset other d
+SISMEMBER other d
+ZADD z 1 one 2 two 3 three
+ZADD z GT 5 one
+ZSCORE z one
+ZADD z GT 2 one
+ZSCORE z one
+ZADD z NX 100 one
+ZSCORE z one
+ZADD z XX CH 50 one
+ZCARD z
+ZCOUNT z 2 3
+ZCOUNT z (2 3
+ZCOUNT z -inf +inf
+ZRANGE z 0 -1
+ZRANGE z 0 -1 WITHSCORES
+ZREVRANGE z 0 -1
+ZRANGEBYSCORE z 2 50
+ZRANGEBYSCORE z (2 50
+ZREVRANGEBYSCORE z 50 2
+ZRANGEBYSCORE z -inf +inf LIMIT 1 2
+ZRANK z two
+ZREVRANK z two
+ZMSCORE z one two nope
+ZINCRBY z 10 two
+ZSCORE z two
+ZPOPMIN z
+ZPOPMAX z 2
+ZADD z2 1 a 2 b 3 c 4 d 5 e
+ZREMRANGEBYRANK z2 0 1
+ZRANGE z2 0 -1
+ZREMRANGEBYSCORE z2 4 5
+ZRANGE z2 0 -1
+ZRANGE z2 0 -1 REV
+SET str val
+LPUSH str x
+HSET str f v
+INCR str
+EXPIRE nope 100
+TTL nope
+SET exp 1
+EXPIRE exp 100
+TTL exp
+PERSIST exp
+TTL exp
+EXPIRETIME nope
+PERSIST nope
+TYPE mylist
+TYPE h
+TYPE myset
+TYPE z2
+TYPE str
+TYPE nope
+RENAME str renamed
+GET renamed
+RENAMENX renamed d
+EXISTS renamed
+COPY d dcopy
+GET dcopy
+DEL a b c
+EXISTS a
+GET missing
+LLEN missing
+HGET missing f
+ZSCORE missing m
+INCR
+SET
+LPUSH onlykey

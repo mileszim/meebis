@@ -14,7 +14,10 @@ pub fn sadd(db: &mut Db, args: &[Bytes]) -> Frame {
         Ok(s) => s,
         Err(_) => return Frame::wrongtype(),
     };
-    let added = args[2..].iter().filter(|m| set.insert((*m).clone())).count();
+    let added = args[2..]
+        .iter()
+        .filter(|m| set.insert((*m).clone()))
+        .count();
     Frame::Integer(added as i64)
 }
 
@@ -99,7 +102,13 @@ pub fn spop(db: &mut Db, args: &[Bytes]) -> Frame {
 
     let members: Vec<Bytes> = match db.get_set(&args[1]) {
         Ok(Some(s)) => s.iter().cloned().collect(),
-        Ok(None) => return if count.is_some() { Frame::Set(vec![]) } else { Frame::Null },
+        Ok(None) => {
+            return if count.is_some() {
+                Frame::Set(vec![])
+            } else {
+                Frame::Null
+            }
+        }
         Err(_) => return Frame::wrongtype(),
     };
 
@@ -134,7 +143,11 @@ pub fn srandmember(db: &mut Db, args: &[Bytes]) -> Frame {
     let members: Vec<Bytes> = match db.get_set(&args[1]) {
         Ok(Some(s)) => s.iter().cloned().collect(),
         Ok(None) => {
-            return if args.len() == 3 { Frame::Array(vec![]) } else { Frame::Null }
+            return if args.len() == 3 {
+                Frame::Array(vec![])
+            } else {
+                Frame::Null
+            }
         }
         Err(_) => return Frame::wrongtype(),
     };
@@ -297,7 +310,11 @@ pub fn sintercard(db: &mut Db, args: &[Bytes]) -> Frame {
         }
     }
     let inter = compute_setop(sets, Op::Inter);
-    let n = if limit == 0 { inter.len() } else { inter.len().min(limit) };
+    let n = if limit == 0 {
+        inter.len()
+    } else {
+        inter.len().min(limit)
+    };
     Frame::Integer(n as i64)
 }
 
@@ -320,7 +337,11 @@ pub fn sscan(db: &mut Db, args: &[Bytes]) -> Frame {
     let items = match db.get_set(&args[1]) {
         Ok(Some(s)) => s
             .iter()
-            .filter(|m| pattern.as_deref().map_or(true, |p| crate::db::glob_match(p, m)))
+            .filter(|m| {
+                pattern
+                    .as_deref()
+                    .map_or(true, |p| crate::db::glob_match(p, m))
+            })
             .cloned()
             .map(Frame::Bulk)
             .collect(),

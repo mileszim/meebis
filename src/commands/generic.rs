@@ -2,8 +2,8 @@
 
 use super::{parse_int, rand_u64, upper, wrong_args};
 use crate::db::{now_ms, Db};
-use bytes::Bytes;
 use crate::resp::Frame;
+use bytes::Bytes;
 
 pub fn del(db: &mut Db, args: &[Bytes]) -> Frame {
     if args.len() < 2 {
@@ -117,7 +117,11 @@ pub fn expiretime(db: &mut Db, args: &[Bytes], seconds: bool) -> Frame {
     }
     match db.expire_at(&args[1]) {
         None => Frame::Integer(-1),
-        Some(at) => Frame::Integer(if seconds { (at / 1000) as i64 } else { at as i64 }),
+        Some(at) => Frame::Integer(if seconds {
+            (at / 1000) as i64
+        } else {
+            at as i64
+        }),
     }
 }
 

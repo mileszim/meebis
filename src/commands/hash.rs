@@ -122,12 +122,7 @@ pub fn hvals(db: &mut Db, args: &[Bytes]) -> Frame {
     hcollect(db, args, "hvals", |_, v| Frame::Bulk(v.clone()))
 }
 
-fn hcollect(
-    db: &mut Db,
-    args: &[Bytes],
-    name: &str,
-    f: impl Fn(&Bytes, &Bytes) -> Frame,
-) -> Frame {
+fn hcollect(db: &mut Db, args: &[Bytes], name: &str, f: impl Fn(&Bytes, &Bytes) -> Frame) -> Frame {
     if args.len() != 2 {
         return wrong_args(name);
     }
@@ -184,7 +179,10 @@ pub fn hincrby(db: &mut Db, args: &[Bytes]) -> Frame {
         Err(_) => return Frame::wrongtype(),
     };
     let cur = match h.get(&args[2]) {
-        Some(v) => match std::str::from_utf8(v).ok().and_then(|s| s.parse::<i64>().ok()) {
+        Some(v) => match std::str::from_utf8(v)
+            .ok()
+            .and_then(|s| s.parse::<i64>().ok())
+        {
             Some(n) => n,
             None => return Frame::err("hash value is not an integer"),
         },
@@ -212,7 +210,10 @@ pub fn hincrbyfloat(db: &mut Db, args: &[Bytes]) -> Frame {
         Err(_) => return Frame::wrongtype(),
     };
     let cur = match h.get(&args[2]) {
-        Some(v) => match std::str::from_utf8(v).ok().and_then(|s| s.trim().parse::<f64>().ok()) {
+        Some(v) => match std::str::from_utf8(v)
+            .ok()
+            .and_then(|s| s.trim().parse::<f64>().ok())
+        {
             Some(f) => f,
             None => return Frame::err("hash value is not a float"),
         },

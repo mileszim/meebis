@@ -268,7 +268,10 @@ pub fn incrby(db: &mut Db, args: &[Bytes], negate: bool) -> Frame {
 
 fn do_incr(db: &mut Db, key: &Bytes, delta: i64) -> Frame {
     let cur = match db.get_str(key) {
-        Ok(Some(s)) => match std::str::from_utf8(s).ok().and_then(|v| v.parse::<i64>().ok()) {
+        Ok(Some(s)) => match std::str::from_utf8(s)
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+        {
             Some(n) => n,
             None => return Frame::err("value is not an integer or out of range"),
         },
@@ -293,7 +296,10 @@ pub fn incrbyfloat(db: &mut Db, args: &[Bytes]) -> Frame {
         Err(e) => return e,
     };
     let cur = match db.get_str(&args[1]) {
-        Ok(Some(s)) => match std::str::from_utf8(s).ok().and_then(|v| v.trim().parse::<f64>().ok()) {
+        Ok(Some(s)) => match std::str::from_utf8(s)
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+        {
             Some(f) => f,
             None => return Frame::err("value is not a valid float"),
         },

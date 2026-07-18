@@ -59,12 +59,17 @@ pub fn config(shared: &Shared, args: &[Bytes]) -> Frame {
             Frame::ok()
         }
         "RESETSTAT" | "REWRITE" => Frame::ok(),
-        other => Frame::err(format!("Unknown CONFIG subcommand '{}'", other.to_lowercase())),
+        other => Frame::err(format!(
+            "Unknown CONFIG subcommand '{}'",
+            other.to_lowercase()
+        )),
     }
 }
 
 pub fn time() -> Frame {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
     Frame::Array(vec![
         Frame::bulk(now.as_secs().to_string()),
         Frame::bulk(now.subsec_micros().to_string()),
@@ -191,7 +196,10 @@ pub fn object(db: &mut Db, args: &[Bytes]) -> Frame {
         "HELP" => Frame::Array(vec![Frame::bulk(
             "OBJECT ENCODING|REFCOUNT|IDLETIME|FREQ <key>",
         )]),
-        other => Frame::err(format!("Unknown OBJECT subcommand '{}'", other.to_lowercase())),
+        other => Frame::err(format!(
+            "Unknown OBJECT subcommand '{}'",
+            other.to_lowercase()
+        )),
     }
 }
 
@@ -223,7 +231,11 @@ pub fn memory(db: &mut Db, args: &[Bytes]) -> Frame {
 fn encoding_of(v: &Value) -> String {
     match v {
         Value::String(s) => {
-            if std::str::from_utf8(s).ok().and_then(|x| x.parse::<i64>().ok()).is_some() {
+            if std::str::from_utf8(s)
+                .ok()
+                .and_then(|x| x.parse::<i64>().ok())
+                .is_some()
+            {
                 "int".into()
             } else if s.len() <= 44 {
                 "embstr".into()
@@ -233,8 +245,12 @@ fn encoding_of(v: &Value) -> String {
         }
         Value::List(_) => "listpack".into(),
         Value::Set(s) => {
-            if s.iter().all(|m| std::str::from_utf8(m).ok().and_then(|x| x.parse::<i64>().ok()).is_some())
-                && s.len() <= 512
+            if s.iter().all(|m| {
+                std::str::from_utf8(m)
+                    .ok()
+                    .and_then(|x| x.parse::<i64>().ok())
+                    .is_some()
+            }) && s.len() <= 512
             {
                 "intset".into()
             } else if s.len() <= 128 {

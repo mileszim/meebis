@@ -52,9 +52,7 @@ impl Frame {
 
     /// The standard wrong-type error.
     pub fn wrongtype() -> Frame {
-        Frame::Error(
-            "WRONGTYPE Operation against a key holding the wrong kind of value".into(),
-        )
+        Frame::Error("WRONGTYPE Operation against a key holding the wrong kind of value".into())
     }
 
     /// Encode this frame onto `out`, using RESP3 forms when `resp3` is true.
@@ -217,7 +215,10 @@ pub fn parse_command(buf: &mut BytesMut) -> Result<Option<Vec<Bytes>>, ParseErro
 
 /// Find the index of the next `\n` at or after `start`.
 fn find_newline(buf: &[u8], start: usize) -> Option<usize> {
-    buf[start..].iter().position(|&b| b == b'\n').map(|p| start + p)
+    buf[start..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map(|p| start + p)
 }
 
 /// Strip a single trailing `\r` from a line slice.
@@ -318,8 +319,14 @@ mod tests {
     #[test]
     fn parses_two_pipelined_commands() {
         let mut buf = BytesMut::from(&b"*1\r\n$4\r\nPING\r\n*1\r\n$4\r\nPING\r\n"[..]);
-        assert_eq!(parse_command(&mut buf).unwrap().unwrap(), vec![Bytes::from("PING")]);
-        assert_eq!(parse_command(&mut buf).unwrap().unwrap(), vec![Bytes::from("PING")]);
+        assert_eq!(
+            parse_command(&mut buf).unwrap().unwrap(),
+            vec![Bytes::from("PING")]
+        );
+        assert_eq!(
+            parse_command(&mut buf).unwrap().unwrap(),
+            vec![Bytes::from("PING")]
+        );
         assert!(parse_command(&mut buf).unwrap().is_none());
     }
 
@@ -336,7 +343,10 @@ mod tests {
     #[test]
     fn parses_bare_inline_and_lone_newline() {
         let mut buf = BytesMut::from(&b"PING\n"[..]);
-        assert_eq!(parse_command(&mut buf).unwrap().unwrap(), vec![Bytes::from("PING")]);
+        assert_eq!(
+            parse_command(&mut buf).unwrap().unwrap(),
+            vec![Bytes::from("PING")]
+        );
     }
 
     #[test]

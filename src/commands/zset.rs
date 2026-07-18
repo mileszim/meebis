@@ -253,7 +253,10 @@ pub fn zcount(db: &mut Db, args: &[Bytes]) -> Frame {
     };
     match db.get_zset(&args[1]) {
         Ok(Some(z)) => {
-            let n = z.iter_asc().filter(|(_, s)| min.contains(*s) && max.contains_max(*s)).count();
+            let n = z
+                .iter_asc()
+                .filter(|(_, s)| min.contains(*s) && max.contains_max(*s))
+                .count();
             Frame::Integer(n as i64)
         }
         Ok(None) => Frame::Integer(0),
@@ -294,7 +297,9 @@ pub fn zrange(db: &mut Db, args: &[Bytes], rev_cmd: bool) -> Frame {
         i += 1;
     }
     if limit.is_some() && !byscore && !bylex {
-        return Frame::err("syntax error, LIMIT is only supported in combination with either BYSCORE or BYLEX");
+        return Frame::err(
+            "syntax error, LIMIT is only supported in combination with either BYSCORE or BYLEX",
+        );
     }
     if withscores && bylex {
         return Frame::err("syntax error, WITHSCORES not supported in combination with BYLEX");
@@ -347,7 +352,11 @@ pub fn zrangebyscore(db: &mut Db, args: &[Bytes], rev: bool) -> Frame {
         Err(_) => return Frame::wrongtype(),
     };
     // ZREVRANGEBYSCORE takes its bounds as (max, min).
-    let (lo, hi) = if rev { (&args[3], &args[2]) } else { (&args[2], &args[3]) };
+    let (lo, hi) = if rev {
+        (&args[3], &args[2])
+    } else {
+        (&args[2], &args[3])
+    };
     range_by_score(&items, lo, hi, rev, limit, withscores)
 }
 
@@ -398,7 +407,10 @@ pub fn zlexcount(db: &mut Db, args: &[Bytes]) -> Frame {
     };
     match db.get_zset(&args[1]) {
         Ok(Some(z)) => {
-            let n = z.iter_asc().filter(|&(m, _)| min.ge_ok(m) && max.le_ok(m)).count();
+            let n = z
+                .iter_asc()
+                .filter(|&(m, _)| min.ge_ok(m) && max.le_ok(m))
+                .count();
             Frame::Integer(n as i64)
         }
         Ok(None) => Frame::Integer(0),
@@ -534,7 +546,10 @@ pub fn zscan(db: &mut Db, args: &[Bytes]) -> Frame {
         Ok(Some(z)) => {
             let mut out = Vec::new();
             for (m, s) in z.iter_asc() {
-                if pattern.as_deref().map_or(true, |p| crate::db::glob_match(p, m)) {
+                if pattern
+                    .as_deref()
+                    .map_or(true, |p| crate::db::glob_match(p, m))
+                {
                     out.push(Frame::Bulk(m.clone()));
                     out.push(Frame::bulk(format_double(s)));
                 }
