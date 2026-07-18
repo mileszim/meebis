@@ -2,8 +2,14 @@
 name = "meebis"
 version = "0.3.0"
 edition = "2021"
+rust-version = "1.71"
 description = "A fast, disposable, in-memory Redis-compatible server for ephemeral dev work"
 license = "MIT"
+repository = "https://github.com/mileszim/meebis"
+homepage = "https://github.com/mileszim/meebis"
+readme = "README.md"
+keywords = ["redis", "in-memory", "cache", "development", "ephemeral"]
+categories = ["caching", "database-implementations", "development-tools"]
 
 [[bin]]
 name = "meebis"
@@ -18,3 +24,8 @@ opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

@@ -18,11 +18,36 @@ exit. There is no persistence, no config file, and nothing to clean up.
 
 It is *not* a Redis replacement for production. It's a dev tool.
 
-## Build & install
+## Install
+
+**Homebrew** (macOS & Linux):
+
+```sh
+brew install mileszim/tap/meebis
+```
+
+**Shell installer** (macOS & Linux) — downloads the right prebuilt binary for your platform:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/mileszim/meebis/releases/latest/download/meebis-installer.sh | sh
+```
+
+**Cargo**:
+
+```sh
+cargo binstall meebis           # prebuilt binary, no compile (needs cargo-binstall)
+cargo install meebis            # build from source (crates.io)
+```
+
+**Prebuilt binaries** for macOS and Linux (arm64 & x86_64) are attached to every
+[release](https://github.com/mileszim/meebis/releases/latest) as `.tar.xz`
+archives, with `sha256` checksums.
+
+**From a local checkout**:
 
 ```sh
 cargo build --release           # ./target/release/meebis
-cargo install --path .          # installs `meebis` into ~/.cargo/bin
+cargo install --path .          # installs `meebis` into your cargo bin
 ```
 
 ## Run
@@ -55,14 +80,30 @@ r.set("hello", "world")
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-p`, `--port <PORT>` | `6379` | Port to listen on |
+| `-p`, `--port <PORT>` | `6379` | Port to listen on (`0` lets the OS pick a free one) |
 | `--bind <ADDR>` | `127.0.0.1` | Address to bind |
+| `--port-file <PATH>` | *(none)* | Write the actual listen port to `<PATH>` on boot |
 | `--requirepass <PASS>` | *(none)* | Require `AUTH` before most commands |
 | `--maxclients <N>` | `10000` | Maximum simultaneous connections |
 | `-h`, `--help` / `-v`, `--version` | | Print help / version |
 
 Multiple processes can connect to the same instance concurrently and share the
 keyspace, including pub/sub and transactions.
+
+### Discovering the port (one instance per worktree)
+
+meebis is meant to be run one-per-worktree and thrown away. Instead of
+hand-assigning a port to each worktree, let the OS pick a free one with
+`--port 0` and record it with `--port-file`, so your app and tests can find it:
+
+```sh
+meebis --port 0 --port-file .meebis-port
+export REDIS_URL="redis://127.0.0.1:$(cat .meebis-port)"
+```
+
+The port is written to the file atomically once meebis has bound, and rewritten
+on each boot — so a reader never sees a half-written value. A `.envrc` (direnv)
+or a `Procfile` is a natural place to wire this into your dev loop.
 
 ## Supported commands
 
