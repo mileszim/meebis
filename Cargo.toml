@@ -1,6 +1,6 @@
 [package]
 name = "meebis"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "A fast, disposable, in-memory Redis-compatible server for ephemeral dev work"
 license = "MIT"
