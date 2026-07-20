@@ -21,6 +21,7 @@ mod db;
 mod pubsub;
 mod resp;
 mod server;
+mod sha1;
 
 use bytes::BytesMut;
 use server::{ClientInfo, ConnState, Shared};
@@ -308,6 +309,19 @@ async fn handle_connection(
                                     close = true;
                                     break;
                                 }
+                                commands::Reply::Block(req) => {
+                                    // Flush anything queued before this
+                                    // command, then park until data arrives
+                                    // or the deadline passes.
+                                    if !out.is_empty() {
+                                        stream.write_all(&out).await?;
+                                        out.clear();
+                                    }
+                                    let frame = block_until_ready(
+                                        &shared, &mut conn, req,
+                                    ).await;
+                                    frame.encode(conn.resp3, &mut out);
+                                }
                             }
                         }
                         Ok(None) => break, // need more bytes
@@ -340,4 +354,47 @@ async fn handle_connection(
     shared.pubsub.remove_client(id);
     shared.clients.lock().unwrap().remove(&id);
     Ok(())
+}
+
+/// Park the connection until a blocking command (`BZPOPMIN`, `XREAD BLOCK`)
+/// can produce a reply, or its deadline passes.
+async fn block_until_ready(
+    shared: &std::sync::Arc<Shared>,
+    conn: &mut ConnState,
+    req: commands::BlockReq,
+) -> resp::Frame {
+    loop {
+        // If a deadline was set, stop now if it has already passed. `None`
+        // means "block forever" (BLOCK 0 / BZPOPMIN 0).
+        let remaining = req.deadline_ms.map(|d| {
+            let now = crate::db::now_ms();
+            if now >= d {
+                std::time::Duration::ZERO
+            } else {
+                std::time::Duration::from_millis(d - now)
+            }
+        });
+        if matches!(remaining, Some(d) if d.is_zero()) {
+            return req.timeout_reply;
+        }
+
+        // Register the notify future BEFORE polling, so a wake that arrives
+        // between the poll and the await is not lost.
+        let notified = shared.write_notify.notified();
+        tokio::pin!(notified);
+
+        if let Some(frame) = commands::retry_block(shared, conn, &req) {
+            return frame;
+        }
+
+        match remaining {
+            Some(d) => match tokio::time::timeout(d, notified).await {
+                Ok(()) => continue,
+                Err(_) => return req.timeout_reply,
+            },
+            None => {
+                notified.await;
+            }
+        }
+    }
 }

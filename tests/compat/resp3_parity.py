@@ -62,6 +62,36 @@ def run(port):
     zv = r.zrandmember("zz", 3, withscores=True)
     o["zrandmember_shape"] = (all(isinstance(p, (list, tuple)) and len(p) == 2 for p in zv), len(zv))
 
+    # Scripting: EVAL, EVALSHA, SCRIPT LOAD/EXISTS.
+    o["eval_int"] = r.eval("return 1", 0)
+    o["eval_array"] = r.eval("return {1,2,3}", 0)
+    o["eval_keys"] = r.eval("return {KEYS[1], ARGV[1]}", 1, "K", "A")
+    o["eval_bulk_from_call"] = r.eval(
+        "redis.call('set', KEYS[1], ARGV[1]); return redis.call('get', KEYS[1])",
+        1, "sk", "hi",
+    )
+    o["eval_status"] = r.eval("return redis.status_reply('TEST')", 0)
+    o["eval_sha1hex"] = r.eval("return redis.sha1hex('')", 0)
+    o["eval_cjson"] = r.eval("return cjson.encode({1,2,3})", 0)
+    o["eval_bit"] = r.eval("return bit.bor(1,2,4)", 0)
+    sha = r.script_load("return 42")
+    o["script_load_sha"] = sha
+    o["evalsha"] = r.evalsha(sha, 0)
+    o["script_exists"] = r.script_exists(sha, "0" * 40)
+
+    # Streams: explicit IDs so results are deterministic across servers.
+    r.xadd("st", {"a": "1"}, id="1-1")
+    r.xadd("st", {"a": "2"}, id="1-2")
+    r.xadd("st", {"b": "3"}, id="2-0")
+    o["xlen"] = r.xlen("st")
+    o["xrange"] = r.xrange("st", min="-", max="+")
+    o["xrevrange"] = r.xrevrange("st", max="+", min="-")
+    o["xread"] = r.xread({"st": "0"}, count=10)
+    o["xdel"] = r.xdel("st", "1-1")
+    o["xlen_after_del"] = r.xlen("st")
+    o["type_stream"] = r.type("st")
+    o["object_encoding_stream"] = r.object("encoding", "st")
+
     return o
 
 

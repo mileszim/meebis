@@ -11,10 +11,13 @@ mod clientcmd;
 mod generic;
 mod hash;
 mod list;
+mod scripting;
 mod set;
+mod stream;
 mod string;
 mod zset;
 
+use crate::db::Db;
 use crate::resp::Frame;
 use crate::server::{ConnState, Shared};
 use bytes::Bytes;
@@ -29,13 +32,21 @@ pub enum Reply {
     Many(Vec<Frame>),
     /// Write the frame, then close the connection (`QUIT`).
     Close(Frame),
+    /// Suspend the connection until data is available or the timeout expires;
+    /// the loop re-runs the given command as the deadline evolves.
+    Block(BlockReq),
 }
 
-/// Lock the shared keyspace. The guard never crosses an `.await`.
-macro_rules! db {
-    ($s:expr) => {
-        &mut *$s.db.lock().unwrap()
-    };
+/// A `BZPOPMIN`/`XREAD BLOCK`-style request the connection loop must drive.
+pub struct BlockReq {
+    /// Original command args, re-executed on each wake-up until data appears
+    /// or the deadline passes.
+    pub args: Vec<Bytes>,
+    /// Absolute deadline in unix milliseconds. `None` means block forever.
+    pub deadline_ms: Option<u64>,
+    /// Reply to send if the deadline passes with no data (`NullArray` is the
+    /// Redis convention for both `BZPOPMIN` and `XREAD BLOCK`).
+    pub timeout_reply: Frame,
 }
 
 /// Commands permitted while a RESP2 connection is in subscribe mode.
@@ -51,6 +62,10 @@ pub fn handle(shared: &Shared, conn: &mut ConnState, args: Vec<Bytes>) -> Reply 
         return Reply::None;
     }
     let name = String::from_utf8_lossy(&args[0]).to_ascii_uppercase();
+    // Any command that isn't itself a block dispatches, then wakes waiters.
+    // Cheaper than tracking write-ness per command; the loop only pays when
+    // something is actually blocked (Notify does no work with zero waiters).
+    let _wake = WakeOnDrop(&shared.write_notify, !is_blocking_cmd(&name));
 
     // Authentication gate.
     if shared.requirepass.is_some()
@@ -93,140 +108,266 @@ pub fn handle(shared: &Shared, conn: &mut ConnState, args: Vec<Bytes>) -> Reply 
         "UNSUBSCRIBE" => Reply::Many(unsubscribe(shared, conn, &args, false)),
         "PUNSUBSCRIBE" => Reply::Many(unsubscribe(shared, conn, &args, true)),
         "RESET" => Reply::One(reset(shared, conn)),
+        "BZPOPMIN" => try_or_block_bzpop(shared, &args, true),
+        "BZPOPMAX" => try_or_block_bzpop(shared, &args, false),
+        "XREAD" => try_or_block_xread(shared, conn, args),
         _ => Reply::One(execute(shared, conn, &name, &args)),
     }
 }
 
+/// Handle a `BZPOPMIN`/`BZPOPMAX`: try once, and if every key is empty either
+/// block (BLOCK/timeout supplied) or return the nil-array timeout reply.
+fn try_or_block_bzpop(shared: &Shared, args: &[Bytes], min: bool) -> Reply {
+    if args.len() < 3 {
+        return Reply::One(wrong_args(if min { "bzpopmin" } else { "bzpopmax" }));
+    }
+    let timeout_arg = args.last().unwrap();
+    let timeout_ms = match parse_timeout_ms(timeout_arg) {
+        Ok(v) => v,
+        Err(e) => return Reply::One(e),
+    };
+    let keys: Vec<Bytes> = args[1..args.len() - 1].to_vec();
+
+    let mut db = shared.db.lock().unwrap();
+    match zset::bzpop_try(&mut db, &keys, min) {
+        Ok(Some(reply)) => Reply::One(reply),
+        Err(e) => Reply::One(e),
+        Ok(None) => Reply::Block(BlockReq {
+            args: args.to_vec(),
+            deadline_ms: timeout_ms.map(|ms| crate::db::now_ms().saturating_add(ms)),
+            timeout_reply: Frame::NullArray,
+        }),
+    }
+}
+
+/// Handle `XREAD`: if `BLOCK` is set and there's no data yet, block; otherwise
+/// let the normal dispatcher run it.
+fn try_or_block_xread(shared: &Shared, conn: &mut ConnState, args: Vec<Bytes>) -> Reply {
+    let block_ms = stream::xread_block_ms(&args);
+    if block_ms.is_none() {
+        return Reply::One(execute(shared, conn, "XREAD", &args));
+    }
+    let mut db = shared.db.lock().unwrap();
+    // Snapshot `$` against the current last_id, so subsequent retries look
+    // for entries added *after* now, not after their own new last_id.
+    let resolved = match stream::resolve_dollar_ids(&mut db, &args) {
+        Ok(v) => v,
+        Err(e) => return Reply::One(e),
+    };
+    let first = stream::xread(&mut db, &resolved);
+    if !matches!(first, Frame::NullArray) {
+        return Reply::One(first);
+    }
+    let ms = block_ms.unwrap();
+    Reply::Block(BlockReq {
+        args: resolved,
+        deadline_ms: if ms == 0 {
+            None
+        } else {
+            Some(crate::db::now_ms().saturating_add(ms))
+        },
+        timeout_reply: Frame::NullArray,
+    })
+}
+
+/// Parse a Redis `timeout` argument (seconds, may be fractional, `0` = block
+/// forever). Returns `Some(ms)` for a positive timeout, `None` for `0`, or an
+/// error frame on malformed input.
+fn parse_timeout_ms(arg: &Bytes) -> Result<Option<u64>, Frame> {
+    let s = std::str::from_utf8(arg)
+        .map_err(|_| Frame::err("timeout is not a float or out of range"))?;
+    let f = s
+        .parse::<f64>()
+        .map_err(|_| Frame::err("timeout is not a float or out of range"))?;
+    if !f.is_finite() || f < 0.0 {
+        return Err(Frame::err("timeout is negative"));
+    }
+    if f == 0.0 {
+        Ok(None)
+    } else {
+        Ok(Some((f * 1000.0).round() as u64))
+    }
+}
+
+/// Retry a blocked command (`BZPOPMIN`/`XREAD BLOCK`) once, non-blocking, and
+/// return `Some(frame)` if it succeeded, `None` if the caller must keep waiting.
+pub fn retry_block(shared: &Shared, conn: &mut ConnState, req: &BlockReq) -> Option<Frame> {
+    let name = String::from_utf8_lossy(&req.args[0]).to_ascii_uppercase();
+    let mut db = shared.db.lock().unwrap();
+    match name.as_str() {
+        "BZPOPMIN" | "BZPOPMAX" => {
+            let min = name == "BZPOPMIN";
+            let keys = &req.args[1..req.args.len() - 1];
+            match zset::bzpop_try(&mut db, keys, min) {
+                Ok(Some(r)) => Some(r),
+                Ok(None) => None,
+                Err(e) => Some(e),
+            }
+        }
+        "XREAD" => {
+            let frame = stream::xread(&mut db, &req.args);
+            if matches!(frame, Frame::NullArray) {
+                None
+            } else {
+                Some(frame)
+            }
+        }
+        _ => {
+            // Not a supported blocking command; fall back to running it non-blocking.
+            Some(execute_locked(&mut db, shared, conn, &name, &req.args))
+        }
+    }
+}
+
 /// Run a single data/server/connection command and return its reply frame.
+///
+/// This acquires the keyspace lock once and delegates to [`execute_locked`], so
+/// that a whole command (and, for `EVAL`, a whole script) sees a consistent
+/// snapshot the way Redis' single thread does.
 fn execute(shared: &Shared, conn: &mut ConnState, name: &str, args: &[Bytes]) -> Frame {
+    let mut db = shared.db.lock().unwrap();
+    execute_locked(&mut db, shared, conn, name, args)
+}
+
+/// Run a single command against an already-locked keyspace. Kept separate from
+/// [`execute`] so `EVAL` can hold the lock across an entire script and route
+/// each `redis.call` back here without re-locking (which would deadlock, since
+/// the keyspace mutex is not reentrant).
+pub(crate) fn execute_locked(
+    db: &mut Db,
+    shared: &Shared,
+    conn: &mut ConnState,
+    name: &str,
+    args: &[Bytes],
+) -> Frame {
     match name {
         // --- strings ---
-        "GET" => string::get(db!(shared), args),
-        "SET" => string::set(db!(shared), args),
-        "SETNX" => string::setnx(db!(shared), args),
-        "SETEX" => string::setex(db!(shared), args, false),
-        "PSETEX" => string::setex(db!(shared), args, true),
-        "GETSET" => string::getset(db!(shared), args),
-        "GETDEL" => string::getdel(db!(shared), args),
-        "GETEX" => string::getex(db!(shared), args),
-        "APPEND" => string::append(db!(shared), args),
-        "STRLEN" => string::strlen(db!(shared), args),
-        "INCR" => string::incr(db!(shared), args, 1),
-        "DECR" => string::incr(db!(shared), args, -1),
-        "INCRBY" => string::incrby(db!(shared), args, false),
-        "DECRBY" => string::incrby(db!(shared), args, true),
-        "INCRBYFLOAT" => string::incrbyfloat(db!(shared), args),
-        "MGET" => string::mget(db!(shared), args),
-        "MSET" => string::mset(db!(shared), args),
-        "MSETNX" => string::msetnx(db!(shared), args),
-        "GETRANGE" | "SUBSTR" => string::getrange(db!(shared), args),
-        "SETRANGE" => string::setrange(db!(shared), args),
+        "GET" => string::get(db, args),
+        "SET" => string::set(db, args),
+        "SETNX" => string::setnx(db, args),
+        "SETEX" => string::setex(db, args, false),
+        "PSETEX" => string::setex(db, args, true),
+        "GETSET" => string::getset(db, args),
+        "GETDEL" => string::getdel(db, args),
+        "GETEX" => string::getex(db, args),
+        "APPEND" => string::append(db, args),
+        "STRLEN" => string::strlen(db, args),
+        "INCR" => string::incr(db, args, 1),
+        "DECR" => string::incr(db, args, -1),
+        "INCRBY" => string::incrby(db, args, false),
+        "DECRBY" => string::incrby(db, args, true),
+        "INCRBYFLOAT" => string::incrbyfloat(db, args),
+        "MGET" => string::mget(db, args),
+        "MSET" => string::mset(db, args),
+        "MSETNX" => string::msetnx(db, args),
+        "GETRANGE" | "SUBSTR" => string::getrange(db, args),
+        "SETRANGE" => string::setrange(db, args),
 
         // --- bitmaps ---
-        "SETBIT" => bitops::setbit(db!(shared), args),
-        "GETBIT" => bitops::getbit(db!(shared), args),
-        "BITCOUNT" => bitops::bitcount(db!(shared), args),
-        "BITPOS" => bitops::bitpos(db!(shared), args),
-        "BITOP" => bitops::bitop(db!(shared), args),
+        "SETBIT" => bitops::setbit(db, args),
+        "GETBIT" => bitops::getbit(db, args),
+        "BITCOUNT" => bitops::bitcount(db, args),
+        "BITPOS" => bitops::bitpos(db, args),
+        "BITOP" => bitops::bitop(db, args),
 
         // --- generic / keyspace ---
-        "DEL" | "UNLINK" => generic::del(db!(shared), args),
-        "EXISTS" => generic::exists(db!(shared), args),
-        "EXPIRE" => generic::expire(db!(shared), args, 1000, true),
-        "PEXPIRE" => generic::expire(db!(shared), args, 1, true),
-        "EXPIREAT" => generic::expire(db!(shared), args, 1000, false),
-        "PEXPIREAT" => generic::expire(db!(shared), args, 1, false),
-        "TTL" => generic::ttl(db!(shared), args, true),
-        "PTTL" => generic::ttl(db!(shared), args, false),
-        "EXPIRETIME" => generic::expiretime(db!(shared), args, true),
-        "PEXPIRETIME" => generic::expiretime(db!(shared), args, false),
-        "PERSIST" => generic::persist(db!(shared), args),
-        "KEYS" => generic::keys(db!(shared), args),
-        "SCAN" => generic::scan(db!(shared), args),
-        "TYPE" => generic::type_cmd(db!(shared), args),
-        "RENAME" => generic::rename(db!(shared), args, false),
-        "RENAMENX" => generic::rename(db!(shared), args, true),
-        "RANDOMKEY" => generic::randomkey(db!(shared), args),
-        "TOUCH" => generic::exists(db!(shared), args),
-        "COPY" => generic::copy(db!(shared), args),
+        "DEL" | "UNLINK" => generic::del(db, args),
+        "EXISTS" => generic::exists(db, args),
+        "EXPIRE" => generic::expire(db, args, 1000, true),
+        "PEXPIRE" => generic::expire(db, args, 1, true),
+        "EXPIREAT" => generic::expire(db, args, 1000, false),
+        "PEXPIREAT" => generic::expire(db, args, 1, false),
+        "TTL" => generic::ttl(db, args, true),
+        "PTTL" => generic::ttl(db, args, false),
+        "EXPIRETIME" => generic::expiretime(db, args, true),
+        "PEXPIRETIME" => generic::expiretime(db, args, false),
+        "PERSIST" => generic::persist(db, args),
+        "KEYS" => generic::keys(db, args),
+        "SCAN" => generic::scan(db, args),
+        "TYPE" => generic::type_cmd(db, args),
+        "RENAME" => generic::rename(db, args, false),
+        "RENAMENX" => generic::rename(db, args, true),
+        "RANDOMKEY" => generic::randomkey(db, args),
+        "TOUCH" => generic::exists(db, args),
+        "COPY" => generic::copy(db, args),
 
         // --- hashes ---
-        "HSET" | "HMSET" => hash::hset(db!(shared), args, name == "HMSET"),
-        "HSETNX" => hash::hsetnx(db!(shared), args),
-        "HGET" => hash::hget(db!(shared), args),
-        "HMGET" => hash::hmget(db!(shared), args),
-        "HDEL" => hash::hdel(db!(shared), args),
-        "HGETALL" => hash::hgetall(db!(shared), args),
-        "HKEYS" => hash::hkeys(db!(shared), args),
-        "HVALS" => hash::hvals(db!(shared), args),
-        "HLEN" => hash::hlen(db!(shared), args),
-        "HEXISTS" => hash::hexists(db!(shared), args),
-        "HSTRLEN" => hash::hstrlen(db!(shared), args),
-        "HINCRBY" => hash::hincrby(db!(shared), args),
-        "HINCRBYFLOAT" => hash::hincrbyfloat(db!(shared), args),
-        "HSCAN" => hash::hscan(db!(shared), args),
-        "HRANDFIELD" => hash::hrandfield(db!(shared), args),
+        "HSET" | "HMSET" => hash::hset(db, args, name == "HMSET"),
+        "HSETNX" => hash::hsetnx(db, args),
+        "HGET" => hash::hget(db, args),
+        "HMGET" => hash::hmget(db, args),
+        "HDEL" => hash::hdel(db, args),
+        "HGETALL" => hash::hgetall(db, args),
+        "HKEYS" => hash::hkeys(db, args),
+        "HVALS" => hash::hvals(db, args),
+        "HLEN" => hash::hlen(db, args),
+        "HEXISTS" => hash::hexists(db, args),
+        "HSTRLEN" => hash::hstrlen(db, args),
+        "HINCRBY" => hash::hincrby(db, args),
+        "HINCRBYFLOAT" => hash::hincrbyfloat(db, args),
+        "HSCAN" => hash::hscan(db, args),
+        "HRANDFIELD" => hash::hrandfield(db, args),
 
         // --- lists ---
-        "LPUSH" => list::push(db!(shared), args, true, false),
-        "RPUSH" => list::push(db!(shared), args, false, false),
-        "LPUSHX" => list::push(db!(shared), args, true, true),
-        "RPUSHX" => list::push(db!(shared), args, false, true),
-        "LPOP" => list::pop(db!(shared), args, true),
-        "RPOP" => list::pop(db!(shared), args, false),
-        "LLEN" => list::llen(db!(shared), args),
-        "LRANGE" => list::lrange(db!(shared), args),
-        "LINDEX" => list::lindex(db!(shared), args),
-        "LSET" => list::lset(db!(shared), args),
-        "LREM" => list::lrem(db!(shared), args),
-        "LTRIM" => list::ltrim(db!(shared), args),
-        "LINSERT" => list::linsert(db!(shared), args),
-        "LPOS" => list::lpos(db!(shared), args),
-        "RPOPLPUSH" => list::rpoplpush(db!(shared), args),
-        "LMOVE" => list::lmove(db!(shared), args),
+        "LPUSH" => list::push(db, args, true, false),
+        "RPUSH" => list::push(db, args, false, false),
+        "LPUSHX" => list::push(db, args, true, true),
+        "RPUSHX" => list::push(db, args, false, true),
+        "LPOP" => list::pop(db, args, true),
+        "RPOP" => list::pop(db, args, false),
+        "LLEN" => list::llen(db, args),
+        "LRANGE" => list::lrange(db, args),
+        "LINDEX" => list::lindex(db, args),
+        "LSET" => list::lset(db, args),
+        "LREM" => list::lrem(db, args),
+        "LTRIM" => list::ltrim(db, args),
+        "LINSERT" => list::linsert(db, args),
+        "LPOS" => list::lpos(db, args),
+        "RPOPLPUSH" => list::rpoplpush(db, args),
+        "LMOVE" => list::lmove(db, args),
 
         // --- sets ---
-        "SADD" => set::sadd(db!(shared), args),
-        "SREM" => set::srem(db!(shared), args),
-        "SMEMBERS" => set::smembers(db!(shared), args),
-        "SISMEMBER" => set::sismember(db!(shared), args),
-        "SMISMEMBER" => set::smismember(db!(shared), args),
-        "SCARD" => set::scard(db!(shared), args),
-        "SPOP" => set::spop(db!(shared), args),
-        "SRANDMEMBER" => set::srandmember(db!(shared), args),
-        "SMOVE" => set::smove(db!(shared), args),
-        "SUNION" => set::setop(db!(shared), args, set::Op::Union, false),
-        "SINTER" => set::setop(db!(shared), args, set::Op::Inter, false),
-        "SDIFF" => set::setop(db!(shared), args, set::Op::Diff, false),
-        "SUNIONSTORE" => set::setop(db!(shared), args, set::Op::Union, true),
-        "SINTERSTORE" => set::setop(db!(shared), args, set::Op::Inter, true),
-        "SDIFFSTORE" => set::setop(db!(shared), args, set::Op::Diff, true),
-        "SINTERCARD" => set::sintercard(db!(shared), args),
-        "SSCAN" => set::sscan(db!(shared), args),
+        "SADD" => set::sadd(db, args),
+        "SREM" => set::srem(db, args),
+        "SMEMBERS" => set::smembers(db, args),
+        "SISMEMBER" => set::sismember(db, args),
+        "SMISMEMBER" => set::smismember(db, args),
+        "SCARD" => set::scard(db, args),
+        "SPOP" => set::spop(db, args),
+        "SRANDMEMBER" => set::srandmember(db, args),
+        "SMOVE" => set::smove(db, args),
+        "SUNION" => set::setop(db, args, set::Op::Union, false),
+        "SINTER" => set::setop(db, args, set::Op::Inter, false),
+        "SDIFF" => set::setop(db, args, set::Op::Diff, false),
+        "SUNIONSTORE" => set::setop(db, args, set::Op::Union, true),
+        "SINTERSTORE" => set::setop(db, args, set::Op::Inter, true),
+        "SDIFFSTORE" => set::setop(db, args, set::Op::Diff, true),
+        "SINTERCARD" => set::sintercard(db, args),
+        "SSCAN" => set::sscan(db, args),
 
         // --- sorted sets ---
-        "ZADD" => zset::zadd(db!(shared), args),
-        "ZREM" => zset::zrem(db!(shared), args),
-        "ZSCORE" => zset::zscore(db!(shared), args),
-        "ZMSCORE" => zset::zmscore(db!(shared), args),
-        "ZCARD" => zset::zcard(db!(shared), args),
-        "ZCOUNT" => zset::zcount(db!(shared), args),
-        "ZINCRBY" => zset::zincrby(db!(shared), args),
-        "ZRANK" => zset::zrank(db!(shared), args, false),
-        "ZREVRANK" => zset::zrank(db!(shared), args, true),
-        "ZRANGE" => zset::zrange(db!(shared), args, false),
-        "ZREVRANGE" => zset::zrange(db!(shared), args, true),
-        "ZRANGEBYSCORE" => zset::zrangebyscore(db!(shared), args, false),
-        "ZREVRANGEBYSCORE" => zset::zrangebyscore(db!(shared), args, true),
-        "ZRANGEBYLEX" => zset::zrangebylex(db!(shared), args, false),
-        "ZREVRANGEBYLEX" => zset::zrangebylex(db!(shared), args, true),
-        "ZLEXCOUNT" => zset::zlexcount(db!(shared), args),
-        "ZPOPMIN" => zset::zpop(db!(shared), args, true),
-        "ZPOPMAX" => zset::zpop(db!(shared), args, false),
-        "ZREMRANGEBYRANK" => zset::zremrangebyrank(db!(shared), args),
-        "ZREMRANGEBYSCORE" => zset::zremrangebyscore(db!(shared), args),
-        "ZSCAN" => zset::zscan(db!(shared), args),
-        "ZRANDMEMBER" => zset::zrandmember(db!(shared), args),
+        "ZADD" => zset::zadd(db, args),
+        "ZREM" => zset::zrem(db, args),
+        "ZSCORE" => zset::zscore(db, args),
+        "ZMSCORE" => zset::zmscore(db, args),
+        "ZCARD" => zset::zcard(db, args),
+        "ZCOUNT" => zset::zcount(db, args),
+        "ZINCRBY" => zset::zincrby(db, args),
+        "ZRANK" => zset::zrank(db, args, false),
+        "ZREVRANK" => zset::zrank(db, args, true),
+        "ZRANGE" => zset::zrange(db, args, false),
+        "ZREVRANGE" => zset::zrange(db, args, true),
+        "ZRANGEBYSCORE" => zset::zrangebyscore(db, args, false),
+        "ZREVRANGEBYSCORE" => zset::zrangebyscore(db, args, true),
+        "ZRANGEBYLEX" => zset::zrangebylex(db, args, false),
+        "ZREVRANGEBYLEX" => zset::zrangebylex(db, args, true),
+        "ZLEXCOUNT" => zset::zlexcount(db, args),
+        "ZPOPMIN" => zset::zpop(db, args, true),
+        "ZPOPMAX" => zset::zpop(db, args, false),
+        "ZREMRANGEBYRANK" => zset::zremrangebyrank(db, args),
+        "ZREMRANGEBYSCORE" => zset::zremrangebyscore(db, args),
+        "ZSCAN" => zset::zscan(db, args),
+        "ZRANDMEMBER" => zset::zrandmember(db, args),
 
         // --- connection ---
         "PING" => clientcmd::ping(args),
@@ -243,21 +384,35 @@ fn execute(shared: &Shared, conn: &mut ConnState, name: &str, args: &[Bytes]) ->
         // --- server / admin ---
         "COMMAND" => admin::command(args),
         "CONFIG" => admin::config(shared, args),
-        "INFO" => admin::info(shared, conn),
-        "DBSIZE" => Frame::Integer(shared.db.lock().unwrap().len() as i64),
+        "INFO" => admin::info(shared, conn, db.len()),
+        "DBSIZE" => Frame::Integer(db.len() as i64),
         "FLUSHDB" | "FLUSHALL" => {
-            db!(shared).clear();
+            db.clear();
             Frame::ok()
         }
+
+        // --- streams ---
+        "XADD" => stream::xadd(db, args),
+        "XLEN" => stream::xlen(db, args),
+        "XRANGE" => stream::xrange(db, args, false),
+        "XREVRANGE" => stream::xrange(db, args, true),
+        "XREAD" => stream::xread(db, args),
+        "XDEL" => stream::xdel(db, args),
+        "XTRIM" => stream::xtrim(db, args),
+
+        // --- scripting ---
+        "EVAL" | "EVAL_RO" => scripting::eval(db, shared, conn, args, scripting::Source::Body),
+        "EVALSHA" | "EVALSHA_RO" => scripting::eval(db, shared, conn, args, scripting::Source::Sha),
+        "SCRIPT" => scripting::script(shared, args),
         "TIME" => admin::time(),
-        "DEBUG" => admin::debug(db!(shared), args),
-        "OBJECT" => admin::object(db!(shared), args),
+        "DEBUG" => admin::debug(db, args),
+        "OBJECT" => admin::object(db, args),
         "WAIT" => Frame::Integer(0),
         "LOLWUT" => Frame::bulk("meebis: a disposable Redis for ephemeral dev work\n"),
         "SAVE" | "BGSAVE" | "BGREWRITEAOF" => Frame::ok(),
         "LASTSAVE" => Frame::Integer((crate::db::now_ms() / 1000) as i64),
         "SWAPDB" => Frame::ok(),
-        "MEMORY" => admin::memory(db!(shared), args),
+        "MEMORY" => admin::memory(db, args),
         "SHUTDOWN" => {
             // A dev tool honoring SHUTDOWN simply exits.
             std::process::exit(0);
@@ -529,6 +684,25 @@ pub(crate) fn norm_index(idx: i64, len: usize) -> i64 {
 /// Uppercased UTF-8 view of an argument (for option keywords).
 pub(crate) fn upper(b: &[u8]) -> String {
     String::from_utf8_lossy(b).to_ascii_uppercase()
+}
+
+fn is_blocking_cmd(name: &str) -> bool {
+    matches!(name, "BZPOPMIN" | "BZPOPMAX" | "BLPOP" | "BRPOP")
+    // XREAD may or may not block; the branch that turns into a Block
+    // returns Reply::Block before this wake would fire.
+}
+
+/// Signal `write_notify` on drop unless suppressed, so blocking commands wake
+/// up. Placed in `handle` around the whole dispatch — cheap when nothing's
+/// blocked (Notify skips work with zero waiters).
+struct WakeOnDrop<'a>(&'a tokio::sync::Notify, bool);
+
+impl Drop for WakeOnDrop<'_> {
+    fn drop(&mut self) {
+        if self.1 {
+            self.0.notify_waiters();
+        }
+    }
 }
 
 /// A fast thread-local xorshift PRNG, seeded lazily from the clock. Used for

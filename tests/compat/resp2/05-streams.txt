@@ -1,0 +1,33 @@
+XADD s 1-1 a 1
+XADD s 1-2 a 2
+XADD s 2-0 b 3
+XLEN s
+XRANGE s - +
+XRANGE s - + COUNT 2
+XREVRANGE s + -
+XRANGE s 1-2 +
+XRANGE s (1-1 +
+XRANGE s - (2-0
+XREAD COUNT 10 STREAMS s 0
+XREAD STREAMS s 1-2
+XREAD STREAMS s 9-9
+XDEL s 1-1 nonexistent-9
+XLEN s
+XADD s2 5 f v
+XADD s2 6 f v
+XLEN s2
+XRANGE s2 - +
+XTRIM s2 MAXLEN 1
+XLEN s2
+XADD s3 MAXLEN 2 10-0 f v
+XADD s3 MAXLEN 2 11-0 f v
+XADD s3 MAXLEN 2 12-0 f v
+XLEN s3
+XRANGE s3 - +
+XADD s4 NOMKSTREAM 1-1 f v
+EXISTS s4
+XADD s 1-0 duplicate low id
+TYPE s
+ZADD zk 1 a 2 b
+BZPOPMIN zk 0
+BZPOPMIN missing 0.1

@@ -33,6 +33,10 @@ pub enum Frame {
     Pairs(Vec<(Frame, Frame)>),
     /// Out-of-band push (pub/sub). RESP2: array. RESP3: `>` push.
     Push(Vec<Frame>),
+    /// The `XREAD` reply shape: an ordered mapping from stream key to its
+    /// batch of entries. RESP2: array of `[key, entries]` pairs. RESP3: `%`
+    /// map. Distinct from `Map` because RESP2 uses `[[k, v]]` here, not `[k, v, ...]`.
+    XReadReply(Vec<(Frame, Frame)>),
 }
 
 impl Frame {
@@ -120,6 +124,22 @@ impl Frame {
                 }
             }
             Frame::Double(d) => encode_double(*d, resp3, out),
+            Frame::XReadReply(pairs) => {
+                if resp3 {
+                    encode_header(b'%', pairs.len(), out);
+                    for (k, v) in pairs {
+                        k.encode(true, out);
+                        v.encode(true, out);
+                    }
+                } else {
+                    encode_header(b'*', pairs.len(), out);
+                    for (k, v) in pairs {
+                        out.extend_from_slice(b"*2\r\n");
+                        k.encode(false, out);
+                        v.encode(false, out);
+                    }
+                }
+            }
             Frame::Pairs(pairs) => {
                 if resp3 {
                     encode_header(b'*', pairs.len(), out);

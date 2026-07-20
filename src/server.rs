@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::Notify;
 
 /// State shared across every connection. Cheap to `Arc`-clone.
 pub struct Shared {
@@ -20,6 +21,13 @@ pub struct Shared {
     pub requirepass: Option<String>,
     /// Free-form config store backing `CONFIG GET`/`CONFIG SET`.
     pub config: Mutex<HashMap<String, String>>,
+    /// Cache of Lua scripts, keyed by the lowercase-hex SHA-1 of the body, as
+    /// populated by `SCRIPT LOAD` / `EVAL` and consulted by `EVALSHA`.
+    pub scripts: Mutex<HashMap<String, Bytes>>,
+    /// Notified whenever a write command runs; blocking commands (`BZPOPMIN`,
+    /// `XREAD BLOCK`) wait on this instead of sleeping so they wake as soon as
+    /// new data may be available.
+    pub write_notify: Notify,
     /// Registry of live clients, for `CLIENT LIST`.
     pub clients: Mutex<HashMap<u64, ClientInfo>>,
     /// 40-hex-char identifier reported by `INFO`, regenerated each boot.
@@ -60,6 +68,8 @@ impl Shared {
             pubsub: PubSub::default(),
             requirepass,
             config: Mutex::new(config),
+            scripts: Mutex::new(HashMap::new()),
+            write_notify: Notify::new(),
             clients: Mutex::new(HashMap::new()),
             run_id: gen_run_id(),
             commands_processed: AtomicU64::new(0),
