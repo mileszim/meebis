@@ -4,7 +4,9 @@
 # Build a fully static musl binary so the final image can be FROM scratch.
 FROM rust:1-alpine AS build
 
-RUN apk add --no-cache musl-dev
+# musl-dev for the static libc; gcc so the `cc` crate can compile the vendored
+# Lua 5.1 sources that back EVAL/EVALSHA.
+RUN apk add --no-cache musl-dev gcc
 
 WORKDIR /src
 

@@ -5,7 +5,7 @@
 //! expired keys lazily on access.
 
 use bytes::Bytes;
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A value stored at a key. The variant determines which commands are legal
@@ -17,6 +17,7 @@ pub enum Value {
     Set(HashSet<Bytes>),
     Hash(HashMap<Bytes, Bytes>),
     ZSet(ZSet),
+    Stream(Stream),
 }
 
 impl Value {
@@ -28,7 +29,61 @@ impl Value {
             Value::Set(_) => "set",
             Value::Hash(_) => "hash",
             Value::ZSet(_) => "zset",
+            Value::Stream(_) => "stream",
         }
+    }
+}
+
+/// A Redis Stream: an ordered, append-mostly log of entries, each a list of
+/// field/value pairs identified by a 128-bit `<ms>-<seq>` id. Backed by a
+/// `BTreeMap` for `O(log n)` ordered iteration by id (what `XRANGE`/`XREAD`
+/// need).
+#[derive(Debug, Clone, Default)]
+pub struct Stream {
+    pub entries: BTreeMap<StreamId, Vec<(Bytes, Bytes)>>,
+    /// The largest id ever assigned in this stream (whether present or not).
+    /// New auto-generated ids must be strictly greater than this.
+    pub last_id: StreamId,
+    /// Tracked so that after deleting the tail we still reject smaller ids.
+    pub max_deleted_id: StreamId,
+}
+
+/// A stream entry id, ordered lexicographically by `(ms, seq)`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StreamId {
+    pub ms: u64,
+    pub seq: u64,
+}
+
+impl StreamId {
+    pub const MIN: StreamId = StreamId { ms: 0, seq: 0 };
+    pub const MAX: StreamId = StreamId {
+        ms: u64::MAX,
+        seq: u64::MAX,
+    };
+
+    pub fn next(self) -> Option<StreamId> {
+        if self.seq == u64::MAX {
+            if self.ms == u64::MAX {
+                None
+            } else {
+                Some(StreamId {
+                    ms: self.ms + 1,
+                    seq: 0,
+                })
+            }
+        } else {
+            Some(StreamId {
+                ms: self.ms,
+                seq: self.seq + 1,
+            })
+        }
+    }
+}
+
+impl std::fmt::Display for StreamId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}-{}", self.ms, self.seq)
     }
 }
 
@@ -241,6 +296,11 @@ impl Db {
                 });
                 fold.hash(&mut h);
             }
+            Value::Stream(s) => {
+                5u8.hash(&mut h);
+                s.entries.len().hash(&mut h);
+                s.last_id.hash(&mut h);
+            }
         }
         Some(h.finish())
     }
@@ -372,6 +432,38 @@ impl Db {
             .value
         {
             Value::ZSet(ref mut z) => Ok(z),
+            _ => Err(WrongType),
+        }
+    }
+
+    pub fn get_stream(&mut self, key: &[u8]) -> Result<Option<&Stream>, WrongType> {
+        match self.get(key) {
+            None => Ok(None),
+            Some(Value::Stream(s)) => Ok(Some(s)),
+            Some(_) => Err(WrongType),
+        }
+    }
+
+    pub fn get_stream_mut(&mut self, key: &[u8]) -> Result<Option<&mut Stream>, WrongType> {
+        match self.get_mut(key) {
+            None => Ok(None),
+            Some(Value::Stream(s)) => Ok(Some(s)),
+            Some(_) => Err(WrongType),
+        }
+    }
+
+    pub fn get_or_create_stream(&mut self, key: Bytes) -> Result<&mut Stream, WrongType> {
+        self.purge_if_expired(&key);
+        match self
+            .data
+            .entry(key)
+            .or_insert_with(|| Entry {
+                value: Value::Stream(Stream::default()),
+                expire_at: None,
+            })
+            .value
+        {
+            Value::Stream(ref mut s) => Ok(s),
             _ => Err(WrongType),
         }
     }

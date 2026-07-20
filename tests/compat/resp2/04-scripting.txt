@@ -1,0 +1,39 @@
+EVAL "return 1" 0
+EVAL "return 3.99" 0
+EVAL "return 'hello'" 0
+EVAL "return {1,2,3,4}" 0
+EVAL "return #KEYS" 0
+EVAL "return redis.status_reply('OK')" 0
+EVAL "return redis.error_reply('my error')" 0
+EVAL "return {err='Bad thing'}" 0
+EVAL "return {ok='fine'}" 0
+EVAL "return redis.sha1hex('')" 0
+EVAL "return cjson.encode({1,2,3})" 0
+EVAL "return cjson.encode({})" 0
+EVAL "return cjson.decode('[10,20,30]')[2]" 0
+EVAL "return cjson.encode({foo='bar'})" 0
+EVAL "return tostring(cmsgpack.unpack(cmsgpack.pack(12345)))" 0
+EVAL "return {cmsgpack.unpack(cmsgpack.pack(1,2,3))}" 0
+EVAL "return bit.bor(1,2,4)" 0
+EVAL "return bit.tohex(255)" 0
+EVAL "return bit.band(6,3)" 0
+EVAL "return tostring(true)" 0
+EVAL "return true" 0
+EVAL "return false" 0
+EVAL "return {1,2,nil,4}" 0
+EVAL "return #ARGV" 0 a b c
+EVAL "return ARGV[1]" 0 hello
+EVAL "redis.call('set', KEYS[1], ARGV[1]); return redis.call('get', KEYS[1])" 1 sk hi
+EVAL "return redis.call('incr', KEYS[1])" 1 counter
+EVAL "return type(redis.call('get','nope'))" 0
+EVAL "local ok = redis.pcall('incr','sk'); return ok.err" 1 sk
+EVAL "return tonumber(ARGV[1]) + 1" 0 41
+EVAL "return {1, 'two', 3, 'four'}" 0
+EVAL "return redis.error_reply('WRONGTYPE nope')" 0
+EVALSHA ffffffffffffffffffffffffffffffffffffffff 0
+EVAL "return" 0
+SCRIPT EXISTS abc
+SCRIPT FLUSH
+SCRIPT LOAD "return 42"
+EVALSHA 1fa00e76656cc152ad327c13fe365858fd7be306 0
+SCRIPT EXISTS 1fa00e76656cc152ad327c13fe365858fd7be306 0000000000000000000000000000000000000000

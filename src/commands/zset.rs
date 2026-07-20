@@ -462,6 +462,39 @@ pub fn zpop(db: &mut Db, args: &[Bytes], min: bool) -> Frame {
     }
 }
 
+/// One non-blocking attempt at `BZPOPMIN`/`BZPOPMAX`. Returns
+/// `Ok(Some(reply))` if any key had data (reply is `[key, member, score]`),
+/// `Ok(None)` if every key was empty (caller may block), and `Err(frame)` on
+/// a type error or bad args.
+pub fn bzpop_try(db: &mut Db, keys: &[Bytes], min: bool) -> Result<Option<Frame>, Frame> {
+    for key in keys {
+        let popped = match db.get_zset(key) {
+            Ok(Some(z)) => {
+                let items = materialize(z);
+                if min {
+                    items.into_iter().next()
+                } else {
+                    items.into_iter().next_back()
+                }
+            }
+            Ok(None) => None,
+            Err(_) => return Err(Frame::wrongtype()),
+        };
+        if let Some((m, s)) = popped {
+            if let Ok(z) = db.get_or_create_zset(key.clone()) {
+                z.remove(&m);
+            }
+            db.remove_if_empty(key);
+            return Ok(Some(Frame::Array(vec![
+                Frame::Bulk(key.clone()),
+                Frame::Bulk(m),
+                Frame::Double(s),
+            ])));
+        }
+    }
+    Ok(None)
+}
+
 pub fn zremrangebyrank(db: &mut Db, args: &[Bytes]) -> Frame {
     if args.len() != 4 {
         return wrong_args("zremrangebyrank");

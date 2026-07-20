@@ -127,8 +127,16 @@ Verified byte-for-byte against Redis 7.2 for the cases in the test suite.
 - **Sorted sets** — `ZADD` (`NX`/`XX`/`GT`/`LT`/`CH`/`INCR`) `ZREM` `ZSCORE`
   `ZMSCORE` `ZCARD` `ZCOUNT` `ZINCRBY` `ZRANK` `ZREVRANK` `ZRANGE` `ZREVRANGE`
   `ZRANGEBYSCORE` `ZREVRANGEBYSCORE` `ZRANGEBYLEX` `ZREVRANGEBYLEX` `ZLEXCOUNT`
-  `ZPOPMIN` `ZPOPMAX` `ZREMRANGEBYRANK` `ZREMRANGEBYSCORE` `ZSCAN`
-  `ZRANDMEMBER`
+  `ZPOPMIN` `ZPOPMAX` `BZPOPMIN` `BZPOPMAX` `ZREMRANGEBYRANK` `ZREMRANGEBYSCORE`
+  `ZSCAN` `ZRANDMEMBER`
+- **Streams** — `XADD` (`*`/`<ms>-*`/explicit IDs, `NOMKSTREAM`, `MAXLEN`/`MINID`
+  with `~`/`=` and `LIMIT`) `XLEN` `XRANGE` `XREVRANGE` `XREAD` (`COUNT`, `BLOCK`,
+  `$` snapshot) `XDEL` `XTRIM`
+- **Scripting** — `EVAL` `EVALSHA` `EVAL_RO` `EVALSHA_RO` `SCRIPT LOAD/EXISTS/FLUSH`,
+  with sandboxed Lua 5.1 (Redis' scripting version), `redis.call`/`pcall`/
+  `error_reply`/`status_reply`/`sha1hex`/`log`, and the `cjson`/`cmsgpack`/`bit`
+  libraries. Scripts run atomically under a single held keyspace lock — the same
+  guarantee Redis' single thread provides.
 - **Pub/Sub** — `SUBSCRIBE` `UNSUBSCRIBE` `PSUBSCRIBE` `PUNSUBSCRIBE` `PUBLISH`
   `PUBSUB`
 - **Transactions** — `MULTI` `EXEC` `DISCARD` `WATCH` `UNWATCH`
@@ -146,8 +154,12 @@ a once-per-second sweep.
 This is a small dev tool, so some Redis features are intentionally absent:
 
 - **Persistence** (RDB/AOF) — everything is in memory and lost on exit.
-- **Lua scripting** (`EVAL`), **Streams** (`XADD`...), **blocking commands**
-  (`BLPOP`...), **HyperLogLog**, **GEO**, and **cluster** mode.
+- **Stream consumer groups** (`XGROUP`, `XREADGROUP`, `XACK`, `XPENDING`,
+  `XCLAIM`, `XAUTOCLAIM`) — `XADD`/`XREAD`/`XRANGE`/`XTRIM`/`XDEL` are
+  supported; groups are not.
+- **List-blocking commands** (`BLPOP`, `BRPOP`, `BLMOVE`, `BLMPOP`, `BZMPOP`) —
+  `BZPOPMIN`/`BZPOPMAX` and `XREAD BLOCK` are supported; the rest are not yet.
+- **HyperLogLog**, **GEO**, and **cluster** mode.
 - **Numbered databases** — `SELECT` is accepted but there is a single shared
   keyspace. `FLUSHDB` and `FLUSHALL` both clear it.
 
@@ -196,12 +208,25 @@ tiny footprint), with all command execution serialized behind one mutex, just
 like Redis. Each connection is an async task; pub/sub messages are pushed to
 subscribers over in-process channels.
 
+Lua scripts (`EVAL`) run under an embedded Lua 5.1 (Redis' scripting version),
+holding that same keyspace mutex for the whole script — so each `redis.call`
+inside a script re-enters the dispatcher against the locked keyspace with no
+opportunity for another connection to interleave. Blocking commands
+(`BZPOPMIN`, `XREAD BLOCK`) release the mutex and park on a shared `Notify`
+that every write wakes, so idle waiters cost zero CPU.
+
 ## Development
 
 ```sh
-cargo test          # unit tests for the protocol, glob matching, expiry, zsets
+cargo test          # unit tests for the protocol, glob matching, expiry, zsets, sha1
 cargo clippy        # clean
 ```
+
+The full Redis compatibility suite lives in `tests/compat/` — RESP2 fixtures
+diffed byte-for-byte against a real `redis-server`, plus a RESP3 parity check
+via `redis-py`. Run it with `bash tests/compat/run.sh` (needs `redis-server`
+and `redis-cli` on PATH; the RESP3 stage needs `python3` with the `redis`
+package).
 
 ## License
 

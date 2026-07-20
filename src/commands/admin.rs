@@ -76,10 +76,9 @@ pub fn time() -> Frame {
     ])
 }
 
-pub fn info(shared: &Shared, conn: &crate::server::ConnState) -> Frame {
+pub fn info(shared: &Shared, conn: &crate::server::ConnState, keys: usize) -> Frame {
     let uptime = shared.start.elapsed().as_secs();
     let clients = shared.clients.lock().unwrap().len();
-    let keys = shared.db.lock().unwrap().len();
     let cmds = shared.commands_processed.load(Ordering::Relaxed);
     let conns = shared.connections_received.load(Ordering::Relaxed);
 
@@ -273,6 +272,7 @@ fn encoding_of(v: &Value) -> String {
                 "skiplist".into()
             }
         }
+        Value::Stream(_) => "stream".into(),
     }
 }
 
@@ -284,6 +284,16 @@ fn estimate_size(v: &Value) -> usize {
         Value::Set(s) => s.iter().map(|e| e.len() + 16).sum(),
         Value::Hash(h) => h.iter().map(|(k, val)| k.len() + val.len() + 32).sum(),
         Value::ZSet(z) => z.iter_asc().map(|(m, _)| m.len() + 24).sum(),
+        Value::Stream(s) => s
+            .entries
+            .values()
+            .map(|fs| {
+                fs.iter()
+                    .map(|(f, v)| f.len() + v.len() + 32)
+                    .sum::<usize>()
+                    + 48
+            })
+            .sum(),
     };
     body + 64
 }
