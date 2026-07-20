@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/mileszim/meebis/compare/v0.4.0...v0.5.0) (2026-07-20)
+
+
+### Features
+
+* add EVAL/SCRIPT, Streams, and blocking commands (BullMQ compatibility) ([#8](https://github.com/mileszim/meebis/issues/8)) ([9c602e3](https://github.com/mileszim/meebis/commit/9c602e3a59c9f956df13540cc9a3d94fb1fb9d6b))
+
 ## [0.4.0](https://github.com/mileszim/meebis/compare/v0.3.0...v0.4.0) (2026-07-18)
 
 
