@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/mileszim/meebis/compare/v0.5.0...v0.6.0) (2026-08-13)
+
+
+### Features
+
+* add verbose logging of commands and replies ([#11](https://github.com/mileszim/meebis/issues/11)) ([8afe071](https://github.com/mileszim/meebis/commit/8afe0719efba4b7b43783cbb2961683fc7b7ed1e))
+
 ## [0.5.0](https://github.com/mileszim/meebis/compare/v0.4.0...v0.5.0) (2026-07-20)
 
 
