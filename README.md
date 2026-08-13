@@ -85,6 +85,8 @@ r.set("hello", "world")
 | `--port-file <PATH>` | *(none)* | Write the actual listen port to `<PATH>` on boot |
 | `--requirepass <PASS>` | *(none)* | Require `AUTH` before most commands |
 | `--maxclients <N>` | `10000` | Maximum simultaneous connections |
+| `--verbose` | *(off)* | Log every command and reply (see [Verbose logging](#verbose-logging)) |
+| `--loglevel <LEVEL>` | `notice` | `nothing`/`warning`/`notice`/`verbose`/`debug`; `verbose` and `debug` are the same as `--verbose` |
 | `-h`, `--help` / `-v`, `--version` | | Print help / version |
 
 Multiple processes can connect to the same instance concurrently and share the
@@ -104,6 +106,64 @@ export REDIS_URL="redis://127.0.0.1:$(cat .meebis-port)"
 The port is written to the file atomically once meebis has bound, and rewritten
 on each boot — so a reader never sees a half-written value. A `.envrc` (direnv)
 or a `Procfile` is a natural place to wire this into your dev loop.
+
+### Verbose logging
+
+To see what your app is actually doing to Redis, start with `--verbose`:
+
+```sh
+meebis --port 6400 --verbose
+```
+
+Every command in and reply out is logged to stdout, tagged with the client id
+that sent it and how long it took:
+
+```
+meebis 0.5.0 ready on 127.0.0.1:6400 (pid 12345) — in-memory, no persistence
+2026-08-13T18:04:21.512Z * verbose logging on — every command and reply is logged
+2026-08-13T18:04:21.583Z #1 * connected from 127.0.0.1:52814
+2026-08-13T18:04:21.583Z #1 > SET greeting "hello world" EX 30
+2026-08-13T18:04:21.583Z #1 < OK (21µs)
+2026-08-13T18:04:21.584Z #1 > LRANGE queue 0 -1
+2026-08-13T18:04:21.584Z #1 < [a, b, c] (6µs)
+2026-08-13T18:04:21.585Z #1 > INCR greeting
+2026-08-13T18:04:21.585Z #1 < (error) ERR value is not an integer or out of range (4µs)
+2026-08-13T18:04:21.612Z #2 * connected from 127.0.0.1:52815
+2026-08-13T18:04:21.612Z #2 > SUBSCRIBE news
+2026-08-13T18:04:21.612Z #2 < (push) [subscribe, news, (integer) 1] (5µs)
+2026-08-13T18:04:21.640Z #2 < (push) [message, news, hello]
+2026-08-13T18:04:21.641Z #1 * disconnected
+```
+
+`>` is a command coming in, `<` a reply going out, `*` a connection event
+(connected, disconnected, parked on a blocking command). Timestamps are UTC.
+Values are quoted the way `redis-cli` shows them, long values and big replies
+are truncated with a note of what was dropped, and passwords (`AUTH`,
+`HELLO ... AUTH`, `CONFIG SET requirepass`) are logged as `<redacted>`.
+
+Commands a Lua script issues are traced too, tagged `(lua)`, so an `EVAL` shows
+its work instead of just its final reply:
+
+```
+2026-08-13T18:04:22.100Z #3 > EVAL "redis.call('set', KEYS[1], ARGV[1]) return redis.call('get', KEYS[1])" 1 k v
+2026-08-13T18:04:22.100Z #3 > (lua) SET k v
+2026-08-13T18:04:22.100Z #3 < (lua) OK (49µs)
+2026-08-13T18:04:22.100Z #3 > (lua) GET k
+2026-08-13T18:04:22.100Z #3 < (lua) v (2µs)
+2026-08-13T18:04:22.101Z #3 < v (312µs)
+```
+
+It can also be flipped on and off on a running server, so you can leave a
+long-lived instance quiet and only trace the moment you care about:
+
+```sh
+redis-cli -p 6400 config set loglevel verbose   # start logging
+redis-cli -p 6400 config set loglevel notice    # stop
+```
+
+Logging is off by default and gated on a single atomic load, so a quiet server
+runs at full speed; with it on, expect to give up some throughput to the
+formatting and writing (~15% under `redis-benchmark`).
 
 ## Supported commands
 

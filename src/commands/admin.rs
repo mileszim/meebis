@@ -50,10 +50,12 @@ pub fn config(shared: &Shared, args: &[Bytes]) -> Frame {
             let mut cfg = shared.config.lock().unwrap();
             let mut i = 2;
             while i + 1 < args.len() {
-                cfg.insert(
-                    String::from_utf8_lossy(&args[i]).into_owned(),
-                    String::from_utf8_lossy(&args[i + 1]).into_owned(),
-                );
+                let key = String::from_utf8_lossy(&args[i]).into_owned();
+                let value = String::from_utf8_lossy(&args[i + 1]).into_owned();
+                if key.eq_ignore_ascii_case("loglevel") {
+                    apply_loglevel(shared, &value);
+                }
+                cfg.insert(key, value);
                 i += 2;
             }
             Frame::ok()
@@ -63,6 +65,25 @@ pub fn config(shared: &Shared, args: &[Bytes]) -> Frame {
             "Unknown CONFIG subcommand '{}'",
             other.to_lowercase()
         )),
+    }
+}
+
+/// Apply a `CONFIG SET loglevel <level>`. Redis' `verbose` and `debug` levels
+/// are the ones that turn per-command logging on here. An unrecognized level is
+/// still stored (CONFIG SET accepts any value in meebis) but leaves logging as
+/// it was.
+fn apply_loglevel(shared: &Shared, value: &str) {
+    match crate::log::level_is_verbose(value) {
+        Some(on) if on != shared.verbose() => {
+            if on {
+                shared.set_verbose(true);
+                crate::log::note("verbose logging on — every command and reply is logged");
+            } else {
+                crate::log::note("verbose logging off");
+                shared.set_verbose(false);
+            }
+        }
+        _ => {}
     }
 }
 
