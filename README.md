@@ -176,7 +176,7 @@ Verified byte-for-byte against Redis 7.2 for the cases in the test suite.
 - **Bitmaps** — `SETBIT` `GETBIT` `BITCOUNT` `BITPOS` `BITOP`
 - **Keys** — `DEL` `UNLINK` `EXISTS` `EXPIRE` `PEXPIRE` `EXPIREAT` `PEXPIREAT`
   `TTL` `PTTL` `EXPIRETIME` `PEXPIRETIME` `PERSIST` `KEYS` `SCAN` `TYPE`
-  `RENAME` `RENAMENX` `RANDOMKEY` `TOUCH` `COPY`
+  `RENAME` `RENAMENX` `RANDOMKEY` `TOUCH` `COPY` `MOVE`
 - **Hashes** — `HSET` `HMSET` `HSETNX` `HGET` `HMGET` `HDEL` `HGETALL` `HKEYS`
   `HVALS` `HLEN` `HEXISTS` `HSTRLEN` `HINCRBY` `HINCRBYFLOAT` `HSCAN` `HRANDFIELD`
 - **Lists** — `LPUSH` `RPUSH` `LPUSHX` `RPUSHX` `LPOP` `RPOP` `LLEN` `LRANGE`
@@ -201,13 +201,24 @@ Verified byte-for-byte against Redis 7.2 for the cases in the test suite.
   `PUBSUB`
 - **Transactions** — `MULTI` `EXEC` `DISCARD` `WATCH` `UNWATCH`
 - **Connection** — `PING` `ECHO` `HELLO` `AUTH` `SELECT` `QUIT` `RESET` `CLIENT`
-- **Server** — `INFO` `CONFIG GET/SET` `DBSIZE` `FLUSHDB` `FLUSHALL` `TIME`
-  `COMMAND` `DEBUG` `OBJECT` `MEMORY` `DBSIZE` `SHUTDOWN` `LOLWUT` (and `SAVE`,
-  `BGSAVE`, etc. as accepted no-ops)
+- **Server** — `INFO` `CONFIG GET/SET` `DBSIZE` `FLUSHDB` `FLUSHALL` `SWAPDB`
+  `TIME` `COMMAND` `DEBUG` `OBJECT` `MEMORY` `DBSIZE` `SHUTDOWN` `LOLWUT` (and
+  `SAVE`, `BGSAVE`, etc. as accepted no-ops)
 
 Keys and values are binary-safe. `EXPIRE` and friends work with the full
 `NX`/`XX`/`GT`/`LT` option set. Expired keys are removed lazily on access and by
 a once-per-second sweep.
+
+### Numbered databases
+
+meebis provides Redis' 16 `SELECT`able databases (`--databases N` to change the
+count). They are fully independent — `KEYS`, `DBSIZE`, `RANDOMKEY`, `FLUSHDB`
+and `WATCH` are all scoped to the selected one, while `FLUSHALL` clears every
+database. Keys cross between them with `MOVE key db` and `COPY src dst DB n`,
+both of which carry the TTL over, and `SWAPDB` exchanges two wholesale.
+
+Pub/Sub is global, as in Redis: a message published on one database is delivered
+to subscribers on all of them.
 
 ## Deliberately not supported
 
@@ -220,8 +231,6 @@ This is a small dev tool, so some Redis features are intentionally absent:
 - **List-blocking commands** (`BLPOP`, `BRPOP`, `BLMOVE`, `BLMPOP`, `BZMPOP`) —
   `BZPOPMIN`/`BZPOPMAX` and `XREAD BLOCK` are supported; the rest are not yet.
 - **HyperLogLog**, **GEO**, and **cluster** mode.
-- **Numbered databases** — `SELECT` is accepted but there is a single shared
-  keyspace. `FLUSHDB` and `FLUSHALL` both clear it.
 
 Both RESP2 and RESP3 are supported — clients using either (e.g. `redis-py`'s
 default RESP3, or `redis-cli`'s RESP2) work without configuration.

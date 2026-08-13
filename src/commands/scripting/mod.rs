@@ -12,7 +12,7 @@ mod cmsgpack;
 mod luabit;
 
 use super::{parse_int, upper, wrong_args};
-use crate::db::Db;
+use crate::db::Keyspace;
 use crate::resp::{format_double, Frame};
 use crate::server::{ConnState, Shared};
 use crate::sha1::sha1_hex;
@@ -83,7 +83,7 @@ pub(crate) fn script(shared: &Shared, args: &[Bytes]) -> Frame {
 
 /// `EVAL` / `EVALSHA` (and their `_RO` aliases).
 pub(crate) fn eval(
-    db: &mut Db,
+    ks: &mut Keyspace,
     shared: &Shared,
     conn: &mut ConnState,
     args: &[Bytes],
@@ -129,18 +129,18 @@ pub(crate) fn eval(
         }
     };
 
-    run_script(db, shared, conn, &body, keys, argv)
+    run_script(ks, shared, conn, &body, keys, argv)
 }
 
 /// The mutable state a script's `redis.call`/`pcall` needs, shared through a
 /// `RefCell` so a single scoped Lua closure can reach it across calls.
 struct Ctx<'a> {
-    db: &'a mut Db,
+    ks: &'a mut Keyspace,
     conn: &'a mut ConnState,
 }
 
 fn run_script(
-    db: &mut Db,
+    ks: &mut Keyspace,
     shared: &Shared,
     conn: &mut ConnState,
     body: &[u8],
@@ -155,13 +155,16 @@ fn run_script(
         return Frame::err(format!("Error preparing script: {e}"));
     }
 
-    let ctx = RefCell::new(Ctx { db, conn });
+    // A script may `redis.call('select', n)`. Redis scopes that to the script
+    // and hands the caller back the database it started on, so remember it.
+    let caller_db = conn.db_index;
+    let ctx = RefCell::new(Ctx { ks, conn });
 
     let result: mlua::Result<Frame> = lua.scope(|scope| {
         let pcall = scope.create_function_mut(|lua, cmd: Variadic<Value>| {
             let mut guard = ctx.borrow_mut();
             let c: &mut Ctx = &mut guard;
-            redis_pcall(lua, shared, &mut *c.db, &mut *c.conn, cmd)
+            redis_pcall(lua, shared, &mut *c.ks, &mut *c.conn, cmd)
         })?;
 
         let redis: Table = lua.globals().get("redis")?;
@@ -185,6 +188,13 @@ fn run_script(
             error_value_to_frame(value)
         })
     });
+
+    // Undo any `select` the script performed, however it exited.
+    let conn = ctx.into_inner().conn;
+    if conn.db_index != caller_db {
+        conn.db_index = caller_db;
+        super::clientcmd::sync_registry_db(shared, conn);
+    }
 
     match result {
         Ok(frame) => frame,
@@ -302,7 +312,7 @@ fn set_keys_argv(lua: &Lua, keys: &[Bytes], argv: &[Bytes]) -> mlua::Result<()> 
 fn redis_pcall(
     lua: &Lua,
     shared: &Shared,
-    db: &mut Db,
+    ks: &mut Keyspace,
     conn: &mut ConnState,
     cmd: Variadic<Value>,
 ) -> mlua::Result<Value> {
@@ -329,7 +339,7 @@ fn redis_pcall(
         ));
     }
     let started = crate::log::script_cmd(shared, conn, &argv);
-    let frame = super::execute_locked(db, shared, conn, &name, &argv);
+    let frame = super::execute_locked(ks, shared, conn, &name, &argv);
     crate::log::script_reply(shared, conn, &frame, started);
     frame_to_lua(lua, frame)
 }

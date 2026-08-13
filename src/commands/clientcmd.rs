@@ -1,6 +1,7 @@
 //! Connection-level commands: PING, ECHO, HELLO, AUTH, SELECT, CLIENT.
 
 use super::{parse_int, upper, wrong_args};
+use crate::db::Keyspace;
 use crate::resp::Frame;
 use crate::server::{ClientInfo, ConnState, Shared};
 use bytes::Bytes;
@@ -20,12 +21,19 @@ pub fn echo(args: &[Bytes]) -> Frame {
     Frame::Bulk(args[1].clone())
 }
 
-pub fn select(args: &[Bytes]) -> Frame {
+/// `SELECT index` — point this connection at another database. The only way
+/// `ConnState::db_index` changes, which is what lets the rest of the server
+/// index the keyspace without re-validating.
+pub fn select(ks: &Keyspace, shared: &Shared, conn: &mut ConnState, args: &[Bytes]) -> Frame {
     if args.len() != 2 {
         return wrong_args("select");
     }
     match parse_int(&args[1]) {
-        Ok(n) if n >= 0 => Frame::ok(),
+        Ok(n) if ks.is_valid(n) => {
+            conn.db_index = n as usize;
+            sync_registry_db(shared, conn);
+            Frame::ok()
+        }
         Ok(_) => Frame::err("DB index is out of range"),
         Err(_) => Frame::err("value is not an integer or out of range"),
     }
@@ -175,6 +183,7 @@ pub fn client(shared: &Shared, conn: &mut ConnState, args: &[Bytes]) -> Frame {
                 addr: conn.addr.to_string(),
                 name: String::from_utf8_lossy(&conn.name).into_owned(),
                 resp3: conn.resp3,
+                db: conn.db_index,
             };
             Frame::Bulk(Bytes::from(format_client_line(&me)))
         }
@@ -192,12 +201,21 @@ fn update_registry_name(shared: &Shared, conn: &ConnState) {
     }
 }
 
+/// Mirror this connection's selected database into the shared registry so
+/// `CLIENT LIST` reports an accurate `db=` for it.
+pub(super) fn sync_registry_db(shared: &Shared, conn: &ConnState) {
+    if let Some(info) = shared.clients.lock().unwrap().get_mut(&conn.id) {
+        info.db = conn.db_index;
+    }
+}
+
 fn format_client_line(c: &ClientInfo) -> String {
     format!(
-        "id={} addr={} laddr=127.0.0.1:0 fd=8 name={} age=0 idle=0 flags=N db=0 sub=0 psub=0 ssub=0 multi=-1 watch=0 qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 tot-net-in=0 tot-net-out=0 rbs=1024 rbp=0 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd=client|info user=default redir=-1 resp={} lib-name= lib-ver=",
+        "id={} addr={} laddr=127.0.0.1:0 fd=8 name={} age=0 idle=0 flags=N db={} sub=0 psub=0 ssub=0 multi=-1 watch=0 qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 tot-net-in=0 tot-net-out=0 rbs=1024 rbp=0 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd=client|info user=default redir=-1 resp={} lib-name= lib-ver=",
         c.id,
         c.addr,
         c.name,
+        c.db,
         if c.resp3 { 3 } else { 2 }
     )
 }

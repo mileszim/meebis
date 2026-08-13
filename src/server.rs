@@ -1,6 +1,6 @@
 //! Process-wide shared state and per-connection state.
 
-use crate::db::Db;
+use crate::db::Keyspace;
 use crate::pubsub::PubSub;
 use crate::resp::Frame;
 use bytes::Bytes;
@@ -14,7 +14,9 @@ use tokio::sync::Notify;
 
 /// State shared across every connection. Cheap to `Arc`-clone.
 pub struct Shared {
-    pub db: Mutex<Db>,
+    /// Every numbered database behind one lock. See [`Keyspace`] for why they
+    /// share a mutex rather than holding one each.
+    pub db: Mutex<Keyspace>,
     pub pubsub: PubSub,
     /// Optional password; when set, connections must `AUTH` before issuing
     /// most commands.
@@ -51,17 +53,19 @@ impl Shared {
         requirepass: Option<String>,
         port: u16,
         maxclients: usize,
+        databases: usize,
         verbose: bool,
         start: Instant,
     ) -> Shared {
         let mut config = HashMap::new();
+        let databases_str = databases.to_string();
         for (k, v) in [
             ("maxmemory", "0"),
             ("maxmemory-policy", "noeviction"),
             ("save", ""),
             ("appendonly", "no"),
             ("appendfsync", "everysec"),
-            ("databases", "16"),
+            ("databases", databases_str.as_str()),
             ("maxclients", "10000"),
             ("timeout", "0"),
             ("tcp-keepalive", "300"),
@@ -70,7 +74,7 @@ impl Shared {
             config.insert(k.to_string(), v.to_string());
         }
         Shared {
-            db: Mutex::new(Db::new()),
+            db: Mutex::new(Keyspace::new(databases)),
             pubsub: PubSub::default(),
             requirepass,
             config: Mutex::new(config),
@@ -120,6 +124,9 @@ pub struct ClientInfo {
     pub addr: String,
     pub name: String,
     pub resp3: bool,
+    /// The database this client has `SELECT`ed, mirrored here so `CLIENT LIST`
+    /// can report other connections' `db=` without reaching into their state.
+    pub db: usize,
 }
 
 /// State owned by a single connection's task.
@@ -129,6 +136,10 @@ pub struct ConnState {
     pub name: Bytes,
     /// Whether the client negotiated RESP3 via `HELLO 3`.
     pub resp3: bool,
+    /// Database this connection has `SELECT`ed; every data command runs against
+    /// `Keyspace::db(db_index)`. Always in range — `SELECT` is the only way to
+    /// change it and it range-checks.
+    pub db_index: usize,
     pub authenticated: bool,
     pub subscribed_channels: HashSet<Bytes>,
     pub subscribed_patterns: HashSet<Bytes>,
@@ -139,8 +150,11 @@ pub struct ConnState {
     /// Set when a queued command was malformed, so `EXEC` aborts.
     pub multi_error: bool,
     /// Keys watched via `WATCH`, mapped to `(existed, fingerprint)` snapshots
-    /// taken at watch time. `EXEC` aborts if any of these changed.
-    pub watched: HashMap<Bytes, (bool, u64)>,
+    /// taken at watch time. `EXEC` aborts if any of these changed. Keyed by
+    /// `(database, key)` because a watch is scoped to the database that was
+    /// selected when it was taken — the same key name in another database is a
+    /// different watch.
+    pub watched: HashMap<(usize, Bytes), (bool, u64)>,
     /// Sender the pub/sub layer uses to push messages to this connection.
     pub tx: UnboundedSender<Frame>,
 }
