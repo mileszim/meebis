@@ -328,7 +328,9 @@ fn redis_pcall(
             "This Redis command is not allowed from script".into(),
         ));
     }
+    let started = crate::log::script_cmd(shared, conn, &argv);
     let frame = super::execute_locked(db, shared, conn, &name, &argv);
+    crate::log::script_reply(shared, conn, &frame, started);
     frame_to_lua(lua, frame)
 }
 

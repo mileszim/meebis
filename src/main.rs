@@ -18,6 +18,7 @@
 
 mod commands;
 mod db;
+mod log;
 mod pubsub;
 mod resp;
 mod server;
@@ -43,6 +44,8 @@ struct Config {
     port_file: Option<String>,
     requirepass: Option<String>,
     maxclients: usize,
+    /// Log every command and reply (`--verbose`, `--loglevel verbose|debug`).
+    verbose: bool,
 }
 
 fn print_help() {
@@ -59,10 +62,19 @@ OPTIONS:
                                (useful with --port 0, so tooling can find it)
         --requirepass <PASS>   Require AUTH with this password
         --maxclients <N>       Maximum simultaneous connections (default: 10000)
+        --verbose              Log every command and reply to stdout
+        --loglevel <LEVEL>     nothing|warning|notice|verbose|debug
+                               (default: notice; verbose and debug log every
+                               command, same as --verbose)
     -h, --help                 Print this help
     -v, --version              Print version
 
-Everything is kept in memory and discarded on exit. There is no persistence."
+Everything is kept in memory and discarded on exit. There is no persistence.
+
+Verbose logging can also be toggled on a running server:
+
+    redis-cli CONFIG SET loglevel verbose
+    redis-cli CONFIG SET loglevel notice"
     );
 }
 
@@ -75,6 +87,7 @@ fn parse_args() -> Result<Config, i32> {
         port_file: None,
         requirepass: None,
         maxclients: 10000,
+        verbose: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -119,6 +132,23 @@ fn parse_args() -> Result<Config, i32> {
                 Some(n) => cfg.maxclients = n,
                 None => {
                     eprintln!("meebis: --maxclients requires a number");
+                    return Err(1);
+                }
+            },
+            "--verbose" => cfg.verbose = true,
+            "--loglevel" => match args.next() {
+                Some(level) => match log::level_is_verbose(&level) {
+                    Some(v) => cfg.verbose = v,
+                    None => {
+                        eprintln!(
+                            "meebis: unknown --loglevel '{level}' \
+                             (nothing|warning|notice|verbose|debug)"
+                        );
+                        return Err(1);
+                    }
+                },
+                None => {
+                    eprintln!("meebis: --loglevel requires a level");
                     return Err(1);
                 }
             },
@@ -187,6 +217,7 @@ async fn run(cfg: Config) -> std::io::Result<()> {
         cfg.requirepass,
         local_addr.port(),
         cfg.maxclients,
+        cfg.verbose,
         start,
     ));
 
@@ -196,6 +227,9 @@ async fn run(cfg: Config) -> std::io::Result<()> {
         local_addr,
         std::process::id()
     );
+    if cfg.verbose {
+        log::note("verbose logging on — every command and reply is logged");
+    }
 
     // Exit cleanly on Ctrl-C; there is nothing to flush.
     tokio::spawn(async {
@@ -258,11 +292,13 @@ async fn handle_connection(
         }
     };
     if over_limit {
+        log::event(&shared, id, "rejected: maxclients reached");
         let mut out = BytesMut::new();
         resp::Frame::Error("ERR max number of clients reached".into()).encode(false, &mut out);
         let _ = stream.write_all(&out).await;
         return Ok(());
     }
+    log::event(&shared, id, &format!("connected from {addr}"));
 
     let (tx, mut rx) = mpsc::unbounded_channel::<resp::Frame>();
     let mut conn = ConnState {
@@ -296,15 +332,21 @@ async fn handle_connection(
                     match resp::parse_command(&mut buf) {
                         Ok(Some(args)) => {
                             shared.commands_processed.fetch_add(1, Ordering::Relaxed);
+                            let started = log::cmd(&shared, &conn, &args);
                             match commands::handle(&shared, &mut conn, args) {
                                 commands::Reply::None => {}
-                                commands::Reply::One(f) => f.encode(conn.resp3, &mut out),
+                                commands::Reply::One(f) => {
+                                    log::reply(&shared, &conn, &f, started);
+                                    f.encode(conn.resp3, &mut out);
+                                }
                                 commands::Reply::Many(frames) => {
+                                    log::replies(&shared, &conn, &frames, started);
                                     for f in frames {
                                         f.encode(conn.resp3, &mut out);
                                     }
                                 }
                                 commands::Reply::Close(f) => {
+                                    log::reply(&shared, &conn, &f, started);
                                     f.encode(conn.resp3, &mut out);
                                     close = true;
                                     break;
@@ -317,9 +359,11 @@ async fn handle_connection(
                                         stream.write_all(&out).await?;
                                         out.clear();
                                     }
+                                    log::event(&shared, conn.id, "blocked, waiting for data");
                                     let frame = block_until_ready(
                                         &shared, &mut conn, req,
                                     ).await;
+                                    log::reply(&shared, &conn, &frame, started);
                                     frame.encode(conn.resp3, &mut out);
                                 }
                             }
@@ -327,6 +371,7 @@ async fn handle_connection(
                         Ok(None) => break, // need more bytes
                         Err(resp::ParseError::Incomplete) => break,
                         Err(resp::ParseError::Protocol(msg)) => {
+                            log::event(&shared, conn.id, &format!("protocol error: {msg}"));
                             resp::Frame::Error(format!("ERR Protocol error: {msg}"))
                                 .encode(conn.resp3, &mut out);
                             close = true;
@@ -341,8 +386,10 @@ async fn handle_connection(
             // Out-of-band pub/sub messages destined for this client.
             Some(frame) = rx.recv() => {
                 let mut out = BytesMut::new();
+                log::reply(&shared, &conn, &frame, None);
                 frame.encode(conn.resp3, &mut out);
                 while let Ok(f) = rx.try_recv() {
+                    log::reply(&shared, &conn, &f, None);
                     f.encode(conn.resp3, &mut out);
                 }
                 stream.write_all(&out).await?;
@@ -351,6 +398,7 @@ async fn handle_connection(
     }
 
     // Tear down: drop subscriptions and deregister.
+    log::event(&shared, id, "disconnected");
     shared.pubsub.remove_client(id);
     shared.clients.lock().unwrap().remove(&id);
     Ok(())

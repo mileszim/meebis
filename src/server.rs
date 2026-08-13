@@ -6,7 +6,7 @@ use crate::resp::Frame;
 use bytes::Bytes;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
@@ -37,6 +37,10 @@ pub struct Shared {
     /// Connections accepted since boot (for `INFO`).
     pub connections_received: AtomicU64,
     next_client_id: AtomicU64,
+    /// Whether every command and reply is logged (`--verbose`, or
+    /// `CONFIG SET loglevel verbose`). Read on every command, so it lives in an
+    /// atomic rather than behind the config mutex.
+    verbose: AtomicBool,
     pub port: u16,
     pub maxclients: usize,
     pub start: Instant,
@@ -47,6 +51,7 @@ impl Shared {
         requirepass: Option<String>,
         port: u16,
         maxclients: usize,
+        verbose: bool,
         start: Instant,
     ) -> Shared {
         let mut config = HashMap::new();
@@ -60,6 +65,7 @@ impl Shared {
             ("maxclients", "10000"),
             ("timeout", "0"),
             ("tcp-keepalive", "300"),
+            ("loglevel", if verbose { "verbose" } else { "notice" }),
         ] {
             config.insert(k.to_string(), v.to_string());
         }
@@ -75,6 +81,7 @@ impl Shared {
             commands_processed: AtomicU64::new(0),
             connections_received: AtomicU64::new(0),
             next_client_id: AtomicU64::new(1),
+            verbose: AtomicBool::new(verbose),
             port,
             maxclients,
             start,
@@ -83,6 +90,16 @@ impl Shared {
 
     pub fn next_client_id(&self) -> u64 {
         self.next_client_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Whether command logging is currently on.
+    pub fn verbose(&self) -> bool {
+        self.verbose.load(Ordering::Relaxed)
+    }
+
+    /// Turn command logging on or off (`CONFIG SET loglevel`).
+    pub fn set_verbose(&self, on: bool) {
+        self.verbose.store(on, Ordering::Relaxed);
     }
 }
 

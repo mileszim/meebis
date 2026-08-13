@@ -40,6 +40,7 @@ def run(port):
     o["exists"] = r.exists("l")
     o["type"] = r.type("l")
     o["config"] = r.config_get("maxmemory")
+    o["config_loglevel"] = r.config_get("loglevel")
     o["object_encoding"] = r.object("encoding", "l")
 
     p = r.pipeline()

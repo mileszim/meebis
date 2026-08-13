@@ -41,3 +41,8 @@ RPUSH lst a b c
 OBJECT ENCODING lst
 OBJECT ENCODING nokey
 OBJECT REFCOUNT nokey
+CONFIG GET loglevel
+CONFIG SET loglevel verbose
+CONFIG GET loglevel
+CONFIG SET loglevel notice
+CONFIG GET loglevel
