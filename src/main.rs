@@ -20,6 +20,7 @@ mod commands;
 mod db;
 mod log;
 mod pubsub;
+mod rdb;
 mod resp;
 mod server;
 mod sha1;
@@ -48,6 +49,12 @@ struct Config {
     databases: usize,
     /// Log every command and reply (`--verbose`, `--loglevel verbose|debug`).
     verbose: bool,
+    /// RDB snapshot to load at boot and write at exit. `None` keeps meebis
+    /// purely ephemeral, which is still the default.
+    dumpfile: Option<std::path::PathBuf>,
+    /// Refuse to start when the dump exists but cannot be loaded, instead of
+    /// setting it aside and starting empty.
+    dumpfile_strict: bool,
 }
 
 fn print_help() {
@@ -65,6 +72,12 @@ OPTIONS:
         --requirepass <PASS>   Require AUTH with this password
         --maxclients <N>       Maximum simultaneous connections (default: 10000)
         --databases <N>        Number of SELECTable databases (default: 16)
+        --dumpfile <PATH>      Load this RDB snapshot at boot and write it back
+                               on exit, on SHUTDOWN, and on SAVE/BGSAVE
+        --dir <DIR>            Redis' spelling of the same thing: the snapshot
+        --dbfilename <NAME>    is <DIR>/<NAME> (default dir '.', name dump.rdb)
+        --dumpfile-strict      Exit rather than start empty when a dump exists
+                               but cannot be loaded
         --verbose              Log every command and reply to stdout
         --loglevel <LEVEL>     nothing|warning|notice|verbose|debug
                                (default: notice; verbose and debug log every
@@ -72,7 +85,13 @@ OPTIONS:
     -h, --help                 Print this help
     -v, --version              Print version
 
-Everything is kept in memory and discarded on exit. There is no persistence.
+Without a dump file, everything is kept in memory and discarded on exit.
+
+A dump file does not make meebis durable — the keyspace still lives only in
+RAM, and only a clean exit writes it out. What it buys is handing state across:
+seed an instance from a snapshot a real Redis wrote, or keep a worktree's
+keyspace across a restart. The file is Redis' own RDB format, so redis-server
+can read what meebis writes and vice versa.
 
 Verbose logging can also be toggled on a running server:
 
@@ -92,7 +111,14 @@ fn parse_args() -> Result<Config, i32> {
         maxclients: 10000,
         databases: db::DEFAULT_DATABASES,
         verbose: false,
+        dumpfile: None,
+        dumpfile_strict: false,
     };
+    // `--dir`/`--dbfilename` are Redis' two-part spelling of `--dumpfile`;
+    // collected separately and combined once every argument has been seen, so
+    // the two can appear in either order.
+    let mut dir: Option<String> = None;
+    let mut dbfilename: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -149,6 +175,28 @@ fn parse_args() -> Result<Config, i32> {
                     return Err(1);
                 }
             },
+            "--dumpfile" => match args.next() {
+                Some(p) => cfg.dumpfile = Some(p.into()),
+                None => {
+                    eprintln!("meebis: --dumpfile requires a path");
+                    return Err(1);
+                }
+            },
+            "--dir" => match args.next() {
+                Some(d) => dir = Some(d),
+                None => {
+                    eprintln!("meebis: --dir requires a directory");
+                    return Err(1);
+                }
+            },
+            "--dbfilename" => match args.next() {
+                Some(n) => dbfilename = Some(n),
+                None => {
+                    eprintln!("meebis: --dbfilename requires a filename");
+                    return Err(1);
+                }
+            },
+            "--dumpfile-strict" => cfg.dumpfile_strict = true,
             "--verbose" => cfg.verbose = true,
             "--loglevel" => match args.next() {
                 Some(level) => match log::level_is_verbose(&level) {
@@ -172,7 +220,85 @@ fn parse_args() -> Result<Config, i32> {
             }
         }
     }
+
+    // An explicit --dumpfile wins; otherwise either half of Redis' spelling is
+    // enough to turn persistence on, defaulting the other half the way Redis
+    // does. Passing neither leaves meebis purely ephemeral.
+    if cfg.dumpfile.is_none() && (dir.is_some() || dbfilename.is_some()) {
+        let dir = dir.unwrap_or_else(|| ".".to_string());
+        let name = dbfilename.unwrap_or_else(|| "dump.rdb".to_string());
+        cfg.dumpfile = Some(std::path::Path::new(&dir).join(name));
+    } else if cfg.dumpfile.is_some() && (dir.is_some() || dbfilename.is_some()) {
+        eprintln!("meebis: --dumpfile cannot be combined with --dir/--dbfilename");
+        return Err(1);
+    }
+
     Ok(cfg)
+}
+
+/// Seed the keyspace from the dump before the listener opens, so no client can
+/// observe the empty pre-load state.
+///
+/// A missing file is the normal first boot. A file that exists but will not
+/// load is the interesting case: by default meebis moves it aside and starts
+/// empty, because a dev server that refuses to boot is worse than one that
+/// starts fresh — but it must not later overwrite the evidence, hence the
+/// rename rather than a warning alone. `--dumpfile-strict` opts into Redis'
+/// behavior of refusing to start.
+fn load_dump(shared: &Shared, path: &std::path::Path, strict: bool) -> Result<(), i32> {
+    let mut ks = shared.db.lock().unwrap();
+    match rdb::load(path, &mut ks) {
+        Ok(None) => {
+            println!("meebis: no dump at {} yet — starting empty", path.display());
+        }
+        Ok(Some(stats)) => {
+            let from = stats
+                .writer_version()
+                .map(|v| format!(" (written by {v})"))
+                .unwrap_or_default();
+            println!(
+                "meebis: loaded {} key(s) from {}{}{}",
+                stats.keys,
+                path.display(),
+                from,
+                if stats.expired > 0 {
+                    format!(", {} already expired", stats.expired)
+                } else {
+                    String::new()
+                }
+            );
+            for loss in stats.losses() {
+                eprintln!("meebis: warning: {loss}");
+            }
+        }
+        Err(e) => {
+            if strict {
+                eprintln!("meebis: could not load {}: {e}", path.display());
+                return Err(1);
+            }
+            eprintln!("meebis: could not load {}: {e}", path.display());
+            match set_aside(path) {
+                Ok(kept) => eprintln!(
+                    "meebis: starting with an empty keyspace; the unreadable file is kept at {}",
+                    kept.display()
+                ),
+                Err(e) => eprintln!(
+                    "meebis: starting with an empty keyspace, but could not preserve the \
+                     unreadable file ({e}) — it will be overwritten on the next save"
+                ),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Rename an unreadable dump out of the way so the next save cannot destroy it.
+fn set_aside(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".unreadable-{}", std::process::id()));
+    let kept = path.with_file_name(name);
+    std::fs::rename(path, &kept)?;
+    Ok(kept)
 }
 
 /// Write the resolved listen `port` to `path` so other processes can discover
@@ -233,24 +359,34 @@ async fn run(cfg: Config) -> std::io::Result<()> {
         cfg.maxclients,
         cfg.databases,
         cfg.verbose,
+        cfg.dumpfile.clone(),
         start,
     ));
 
+    if let Some(path) = &cfg.dumpfile {
+        if let Err(code) = load_dump(&shared, path, cfg.dumpfile_strict) {
+            std::process::exit(code);
+        }
+    }
+
     println!(
-        "meebis {} ready on {} (pid {}) — in-memory, no persistence",
+        "meebis {} ready on {} (pid {}) — {}",
         VERSION,
         local_addr,
-        std::process::id()
+        std::process::id(),
+        match &cfg.dumpfile {
+            Some(p) => format!("in-memory, snapshotting to {}", p.display()),
+            None => "in-memory, no persistence".to_string(),
+        }
     );
     if cfg.verbose {
         log::note("verbose logging on — every command and reply is logged");
     }
 
-    // Exit cleanly on Ctrl-C; there is nothing to flush.
-    tokio::spawn(async {
-        let _ = tokio::signal::ctrl_c().await;
-        std::process::exit(0);
-    });
+    // Snapshot and exit on Ctrl-C and on SIGTERM (how a container or a
+    // supervisor stops us). Without a dump file there is nothing to flush and
+    // this is the same immediate exit as before.
+    spawn_signal_handler(shared.clone());
 
     // Periodically drop keys whose TTL has elapsed so memory doesn't creep.
     tokio::spawn({
@@ -280,6 +416,47 @@ async fn run(cfg: Config) -> std::io::Result<()> {
             let _ = handle_connection(shared, stream, addr).await;
         });
     }
+}
+
+/// Write the snapshot (if configured) and exit. Failing to save is reported and
+/// still exits: the signal already told us to go, and hanging around after a
+/// SIGTERM would be worse than losing the snapshot.
+fn save_and_exit(shared: &Shared, signal: &str) -> ! {
+    if let Some(result) = shared.save_dump_locking() {
+        match result {
+            Ok(()) => log::note(&format!("{signal}: keyspace saved")),
+            Err(e) => eprintln!("meebis: {signal}: could not save: {e}"),
+        }
+    }
+    std::process::exit(0);
+}
+
+/// Wire up the signals that mean "stop". SIGTERM only exists on unix; on other
+/// platforms Ctrl-C is the whole story.
+fn spawn_signal_handler(shared: Arc<Shared>) {
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut term = match signal(SignalKind::terminate()) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("meebis: could not listen for SIGTERM: {e}");
+                    let _ = tokio::signal::ctrl_c().await;
+                    save_and_exit(&shared, "interrupted");
+                }
+            };
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => save_and_exit(&shared, "interrupted"),
+                _ = term.recv() => save_and_exit(&shared, "terminated"),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+            save_and_exit(&shared, "interrupted");
+        }
+    });
 }
 
 async fn handle_connection(

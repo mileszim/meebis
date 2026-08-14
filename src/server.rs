@@ -6,6 +6,7 @@ use crate::resp::Frame;
 use bytes::Bytes;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
@@ -43,6 +44,13 @@ pub struct Shared {
     /// `CONFIG SET loglevel verbose`). Read on every command, so it lives in an
     /// atomic rather than behind the config mutex.
     verbose: AtomicBool,
+    /// Where the RDB snapshot lives, when `--dumpfile` (or `--dir` /
+    /// `--dbfilename`) asked for one. `None` restores the original behavior:
+    /// nothing is read at boot and nothing is written at exit.
+    pub dumpfile: Option<PathBuf>,
+    /// Unix seconds of the last successful save, for `LASTSAVE` and `INFO`.
+    /// Seeded with boot time, exactly as Redis does.
+    last_save: AtomicU64,
     pub port: u16,
     pub maxclients: usize,
     pub start: Instant,
@@ -55,10 +63,34 @@ impl Shared {
         maxclients: usize,
         databases: usize,
         verbose: bool,
+        dumpfile: Option<PathBuf>,
         start: Instant,
     ) -> Shared {
         let mut config = HashMap::new();
         let databases_str = databases.to_string();
+
+        // `dir` and `dbfilename` are probed by tooling even when persistence is
+        // off, so report Redis' defaults in that case rather than nothing.
+        let (dir, dbfilename) = match &dumpfile {
+            Some(p) => (
+                p.parent()
+                    .filter(|d| !d.as_os_str().is_empty())
+                    .unwrap_or(std::path::Path::new("."))
+                    .to_string_lossy()
+                    .into_owned(),
+                p.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            None => (
+                std::env::current_dir()
+                    .map(|d| d.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| ".".to_string()),
+                "dump.rdb".to_string(),
+            ),
+        };
+
         for (k, v) in [
             ("maxmemory", "0"),
             ("maxmemory-policy", "noeviction"),
@@ -70,6 +102,8 @@ impl Shared {
             ("timeout", "0"),
             ("tcp-keepalive", "300"),
             ("loglevel", if verbose { "verbose" } else { "notice" }),
+            ("dir", dir.as_str()),
+            ("dbfilename", dbfilename.as_str()),
         ] {
             config.insert(k.to_string(), v.to_string());
         }
@@ -86,6 +120,8 @@ impl Shared {
             connections_received: AtomicU64::new(0),
             next_client_id: AtomicU64::new(1),
             verbose: AtomicBool::new(verbose),
+            dumpfile,
+            last_save: AtomicU64::new(crate::db::now_ms() / 1000),
             port,
             maxclients,
             start,
@@ -94,6 +130,31 @@ impl Shared {
 
     pub fn next_client_id(&self) -> u64 {
         self.next_client_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Unix seconds of the last successful save (`LASTSAVE`).
+    pub fn last_save(&self) -> u64 {
+        self.last_save.load(Ordering::Relaxed)
+    }
+
+    /// Write `ks` to the configured dump file, returning `None` when no dump
+    /// file was configured. Takes an already-locked keyspace because every
+    /// caller either holds the lock already (`SAVE`, `SHUTDOWN`) or is the
+    /// exit path, and the mutex is not reentrant.
+    pub fn save_dump(&self, ks: &mut Keyspace) -> Option<Result<(), crate::rdb::Error>> {
+        let path = self.dumpfile.as_ref()?;
+        let result = crate::rdb::save(path, ks);
+        if result.is_ok() {
+            self.last_save
+                .store(crate::db::now_ms() / 1000, Ordering::Relaxed);
+        }
+        Some(result)
+    }
+
+    /// [`Shared::save_dump`] for callers that do not already hold the lock.
+    pub fn save_dump_locking(&self) -> Option<Result<(), crate::rdb::Error>> {
+        let mut ks = self.db.lock().unwrap();
+        self.save_dump(&mut ks)
     }
 
     /// Whether command logging is currently on.

@@ -30,9 +30,28 @@ src/
     mod.rs            dispatch, auth gate, transactions, pub/sub commands
     string.rs bitops.rs generic.rs hash.rs list.rs set.rs zset.rs
     clientcmd.rs       connection commands (PING/HELLO/AUTH/CLIENT/...)
-    admin.rs           server commands (INFO/CONFIG/COMMAND/OBJECT/...)
-tests/compat/         Redis-spec differential + RESP3 parity harness
+    admin.rs           server commands (INFO/CONFIG/COMMAND/OBJECT/SAVE/...)
+  rdb/
+    mod.rs            load/save entry points, error and stats types
+    cursor.rs         bounds-checked reader + the length/string codecs
+    crc64.rs lzf.rs   checksum and decompression primitives
+    packed.rs         listpack/ziplist/intset decoders, listpack writer
+    read.rs write.rs  value codecs (read accepts all; write stays flat)
+    stream.rs         the one type with no plain encoding
+tests/compat/         Redis-spec differential + RESP3 parity + RDB interchange
 ```
+
+### The RDB codec is asymmetric on purpose
+
+`rdb::read` accepts every encoding across RDB versions 1–11, because Redis
+chooses the encoding and a real dump *will* contain listpacks, quicklists, and
+intsets. `rdb::write` emits only the flat, oldest-spelling forms (types 0/1/2/4/5),
+which current Redis still loads — verified against 7.2. Do not "modernize" the
+writer to emit packed encodings; that trades a large amount of new code for
+smaller files nobody is measuring.
+
+Streams are the exception: `RDB_TYPE_STREAM_LISTPACKS*` has no flat form, so
+`rdb::stream` is the only place meebis builds a listpack.
 
 ## Dev commands
 
@@ -42,11 +61,17 @@ cargo test                              # unit tests (protocol, glob, expiry, zs
 cargo fmt --all                         # format (CI enforces --check)
 cargo clippy --all-targets              # lint (CI enforces -D warnings)
 bash tests/compat/run.sh ./target/release/meebis   # Redis-spec compatibility
+bash tests/compat/rdb.sh ./target/release/meebis  # just the RDB interchange stage
 ```
 
 The compatibility script needs `redis-server`/`redis-cli` on PATH; the RESP3
 stage additionally needs `python3` with the `redis` package (it is skipped if
 absent). CI installs all of these.
+
+`run.sh` ends by calling `rdb.sh`, which starts its own servers to prove a
+snapshot written by either server loads into the other. When you touch the
+codec, run that stage directly — it is the only test that exercises the
+encodings Redis emits but meebis never writes.
 
 ## Commit messages drive releases
 

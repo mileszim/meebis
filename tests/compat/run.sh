@@ -25,13 +25,21 @@ for bin in redis-server redis-cli; do
     command -v "$bin" >/dev/null || { echo "missing required tool: $bin" >&2; exit 2; }
 done
 
-redis-server --port "$RPORT" --save '' --appendonly no --logfile /dev/null &
+# DEBUG is gated behind a config flag from Redis 7 on, and the reload fixture
+# needs it: DEBUG RELOAD is what drives a keyspace through the RDB codec and
+# back. Redis implements it by writing a real file and reading it back, so give
+# it a scratch directory — otherwise it drops a dump.rdb in whatever directory
+# the suite happened to be run from.
+SCRATCH="$(mktemp -d)"
+redis-server --port "$RPORT" --save '' --appendonly no --logfile /dev/null \
+    --dir "$SCRATCH" --enable-debug-command local &
 RPID=$!
 "$MEEBIS_BIN" --port "$MPORT" >/dev/null 2>&1 &
 MPID=$!
 cleanup() {
     kill "$MPID" "$RPID" 2>/dev/null || true
     wait "$MPID" "$RPID" 2>/dev/null || true
+    rm -rf "$SCRATCH"
 }
 trap cleanup EXIT
 
@@ -70,6 +78,12 @@ if command -v python3 >/dev/null 2>&1 && python3 -c 'import redis' >/dev/null 2>
     fi
 else
     echo "  skipped (python3 + redis package not available)"
+fi
+
+# The RDB stage starts and stops its own servers on other ports, since it has
+# to restart them against specific dump files.
+if ! bash "$DIR/rdb.sh" "$MEEBIS_BIN"; then
+    fail=1
 fi
 
 if [[ "$fail" -eq 0 ]]; then

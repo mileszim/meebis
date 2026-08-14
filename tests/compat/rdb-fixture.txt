@@ -1,0 +1,24 @@
+SELECT 0
+SET plain hello
+SET intish 1234567890
+SET longstr aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+SET empty ""
+SETEX volatile 86400 tempvalue
+RPUSH smalllist a b c
+RPUSH duplist b a b c a
+SADD intset 1 2 3 42 -7
+SADD strset alpha beta gamma
+HSET smallhash f1 v1 f2 v2 f3 v3
+ZADD smallzset 1 one 2.5 two -3 three
+ZADD edgezset inf posinf -inf neginf 0 zero
+XADD events 100-1 kind created id 1
+XADD events 100-2 kind updated id 2
+XADD events 200-1 other shape
+XADD events 300-5 kind deleted id 3 extra field
+SELECT 3
+SET in-db-three yes
+RPUSH db3list x y z
+HSET db3hash a 1 b 2
+SELECT 15
+SET in-db-fifteen yes
+ZADD db15zset 1 m

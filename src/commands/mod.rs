@@ -257,6 +257,18 @@ pub(crate) fn execute_locked(
             return Frame::ok();
         }
         "INFO" => return admin::info(shared, conn, ks),
+        // DEBUG RELOAD rebuilds the entire keyspace, so DEBUG is resolved here
+        // and told which database the connection is on.
+        "DEBUG" => return admin::debug(ks, conn.db_index, args),
+        // Persistence spans every database, so these are resolved here rather
+        // than against the selected one.
+        "SAVE" => return admin::save(shared, ks, false),
+        "BGSAVE" => return admin::save(shared, ks, true),
+        "BGREWRITEAOF" => {
+            return Frame::Simple("Background append only file rewriting started".into())
+        }
+        "LASTSAVE" => return Frame::Integer(shared.last_save() as i64),
+        "SHUTDOWN" => return admin::shutdown(shared, ks, args),
         // Scripts run against the whole keyspace: `redis.call('select', n)` is
         // legal inside one (and scoped to it).
         "EVAL" | "EVAL_RO" => {
@@ -431,17 +443,10 @@ pub(crate) fn execute_locked(
         // EVAL/EVALSHA are handled above; they need the whole keyspace.
         "SCRIPT" => scripting::script(shared, args),
         "TIME" => admin::time(),
-        "DEBUG" => admin::debug(db, args),
         "OBJECT" => admin::object(db, args),
         "WAIT" => Frame::Integer(0),
         "LOLWUT" => Frame::bulk("meebis: a disposable Redis for ephemeral dev work\n"),
-        "SAVE" | "BGSAVE" | "BGREWRITEAOF" => Frame::ok(),
-        "LASTSAVE" => Frame::Integer((crate::db::now_ms() / 1000) as i64),
         "MEMORY" => admin::memory(db, args),
-        "SHUTDOWN" => {
-            // A dev tool honoring SHUTDOWN simply exits.
-            std::process::exit(0);
-        }
 
         other => Frame::err(format!(
             "unknown command '{}', with args beginning with: {}",
