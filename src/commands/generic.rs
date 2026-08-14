@@ -1,8 +1,9 @@
 //! Generic keyspace commands: existence, expiry, renaming, scanning.
 
 use super::{parse_int, rand_u64, upper, wrong_args};
-use crate::db::{now_ms, Db};
+use crate::db::{now_ms, Db, Keyspace};
 use crate::resp::Frame;
+use crate::server::ConnState;
 use bytes::Bytes;
 
 pub fn del(db: &mut Db, args: &[Bytes]) -> Frame {
@@ -219,11 +220,19 @@ pub fn randomkey(db: &mut Db, args: &[Bytes]) -> Frame {
     }
 }
 
-pub fn copy(db: &mut Db, args: &[Bytes]) -> Frame {
+/// `COPY src dst [DB n] [REPLACE]` — duplicate a key, optionally into another
+/// database, carrying its TTL across.
+///
+/// The check order mirrors Redis and is load-bearing for parity: a bad `DB`
+/// index errors before anything else, "same object" is rejected before the
+/// source is even looked up, and a missing source reports 0 rather than
+/// consulting the destination.
+pub fn copy(ks: &mut Keyspace, conn: &ConnState, args: &[Bytes]) -> Frame {
     if args.len() < 3 {
         return wrong_args("copy");
     }
     let mut replace = false;
+    let mut dst_db = conn.db_index;
     let mut i = 3;
     while i < args.len() {
         match upper(&args[i]).as_str() {
@@ -231,26 +240,95 @@ pub fn copy(db: &mut Db, args: &[Bytes]) -> Frame {
                 replace = true;
                 i += 1;
             }
-            // DB targeting is meaningless here (single database); accept & skip.
-            "DB" if i + 1 < args.len() => i += 2,
+            "DB" if i + 1 < args.len() => {
+                let n = match parse_int(&args[i + 1]) {
+                    Ok(n) => n,
+                    Err(e) => return e,
+                };
+                if !ks.is_valid(n) {
+                    return Frame::err("DB index is out of range");
+                }
+                dst_db = n as usize;
+                i += 2;
+            }
             _ => return Frame::err("syntax error"),
         }
     }
 
-    if !db.contains(&args[1]) {
-        return Frame::Integer(0);
+    let (src_key, dst_key) = (&args[1], &args[2]);
+    // Copying a key onto itself is an error even with REPLACE, but the same
+    // name in a *different* database is a perfectly ordinary copy.
+    if dst_db == conn.db_index && src_key == dst_key {
+        return Frame::err("source and destination objects are the same");
     }
-    if db.contains(&args[2]) && !replace {
-        return Frame::Integer(0);
-    }
-    let value = match db.get(&args[1]).cloned() {
+
+    let src = ks.db(conn.db_index);
+    let value = match src.get(src_key).cloned() {
         Some(v) => v,
         None => return Frame::Integer(0),
     };
-    let ttl = db.expire_at(&args[1]);
-    db.set(args[2].clone(), value);
-    if let Some(at) = ttl {
-        db.set_expire(&args[2], at);
+    let ttl = src.expire_at(src_key);
+
+    let dst = ks.db(dst_db);
+    if dst.contains(dst_key) && !replace {
+        return Frame::Integer(0);
     }
+    dst.put(dst_key.clone(), value, ttl);
     Frame::Integer(1)
+}
+
+/// `MOVE key db` — relocate a key to another database, TTL intact. Returns 0
+/// (not an error) when the source is missing or the destination is occupied.
+pub fn move_key(ks: &mut Keyspace, conn: &ConnState, args: &[Bytes]) -> Frame {
+    if args.len() != 3 {
+        return wrong_args("move");
+    }
+    let n = match parse_int(&args[2]) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    if !ks.is_valid(n) {
+        return Frame::err("DB index is out of range");
+    }
+    let dst_db = n as usize;
+    // Redis rejects a same-database move before looking the key up, so this
+    // errors even for a key that does not exist.
+    if dst_db == conn.db_index {
+        return Frame::err("source and destination objects are the same");
+    }
+
+    let (src, dst) = ks.pair(conn.db_index, dst_db);
+    if dst.contains(&args[1]) {
+        return Frame::Integer(0);
+    }
+    match src.take(&args[1]) {
+        Some((value, expire_at)) => {
+            dst.put(args[1].clone(), value, expire_at);
+            Frame::Integer(1)
+        }
+        None => Frame::Integer(0),
+    }
+}
+
+/// `SWAPDB idx1 idx2` — exchange two databases wholesale. Clients stay pointed
+/// at their index, so they observe the swap without reconnecting.
+pub fn swapdb(ks: &mut Keyspace, args: &[Bytes]) -> Frame {
+    if args.len() != 3 {
+        return wrong_args("swapdb");
+    }
+    // Both indexes are type-checked before either is range-checked, which is
+    // why `SWAPDB 99 notanumber` reports the second argument, not the first.
+    let first = match parse_int(&args[1]) {
+        Ok(n) => n,
+        Err(_) => return Frame::err("invalid first DB index"),
+    };
+    let second = match parse_int(&args[2]) {
+        Ok(n) => n,
+        Err(_) => return Frame::err("invalid second DB index"),
+    };
+    if !ks.is_valid(first) || !ks.is_valid(second) {
+        return Frame::err("DB index is out of range");
+    }
+    ks.swap(first as usize, second as usize);
+    Frame::ok()
 }

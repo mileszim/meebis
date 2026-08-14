@@ -1,8 +1,8 @@
 //! The in-memory keyspace: values, expiry, and the sorted-set type.
 //!
-//! There is deliberately no persistence and no durability. A single [`Db`] is
-//! shared behind a mutex; every command locks it mutably, which lets us purge
-//! expired keys lazily on access.
+//! There is deliberately no persistence and no durability. A single
+//! [`Keyspace`] — Redis' numbered databases — is shared behind one mutex; every
+//! command locks it mutably, which lets us purge expired keys lazily on access.
 
 use bytes::Bytes;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -101,8 +101,85 @@ pub fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// The keyspace. Redis' concept of numbered databases is collapsed to a single
-/// map — `SELECT` is accepted but ignored.
+/// Redis' numbered databases: `N` independent [`Db`]s, selected per-connection
+/// with `SELECT` and reported by `CONFIG GET databases`.
+///
+/// All of them live behind the single keyspace mutex rather than one lock each.
+/// That keeps the guarantee the rest of the server is built on — a command, or
+/// a whole `EVAL` script, sees one consistent view — and lets the cross-database
+/// commands (`SWAPDB`, `MOVE`, `COPY ... DB`) touch two databases at once
+/// without a second lock to order against the first.
+pub struct Keyspace {
+    dbs: Vec<Db>,
+}
+
+impl Keyspace {
+    /// Build `count` empty databases. Empty ones cost a `HashMap` header and no
+    /// allocation, so the default 16 is effectively free.
+    pub fn new(count: usize) -> Keyspace {
+        Keyspace {
+            dbs: (0..count.max(1)).map(|_| Db::new()).collect(),
+        }
+    }
+
+    /// The database at `index`, which callers must have already validated
+    /// (connections can only reach one through `SELECT`, which range-checks).
+    pub fn db(&mut self, index: usize) -> &mut Db {
+        &mut self.dbs[index]
+    }
+
+    /// Two *distinct* databases at once, for `MOVE` and `COPY ... DB`.
+    ///
+    /// Panics if `a == b`; both callers reject that case earlier with Redis'
+    /// "source and destination objects are the same" error.
+    pub fn pair(&mut self, a: usize, b: usize) -> (&mut Db, &mut Db) {
+        assert_ne!(a, b, "Keyspace::pair requires distinct databases");
+        if a < b {
+            let (left, right) = self.dbs.split_at_mut(b);
+            (&mut left[a], &mut right[0])
+        } else {
+            let (left, right) = self.dbs.split_at_mut(a);
+            (&mut right[0], &mut left[b])
+        }
+    }
+
+    /// `SWAPDB`: exchange the contents of two databases. Swapping the `Db`s
+    /// themselves is O(1) and, like Redis, leaves clients pointed at the same
+    /// *index* — so they see the other database's data without reconnecting.
+    pub fn swap(&mut self, a: usize, b: usize) {
+        self.dbs.swap(a, b);
+    }
+
+    /// `FLUSHALL`: empty every database.
+    pub fn clear_all(&mut self) {
+        for db in &mut self.dbs {
+            db.clear();
+        }
+    }
+
+    /// Every database in index order, for the periodic expiry sweep and
+    /// `INFO keyspace`.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Db> {
+        self.dbs.iter_mut()
+    }
+
+    /// Whether `index` names a database that exists. Takes an `i64` because
+    /// every caller has just parsed one off the wire and must reject negatives.
+    pub fn is_valid(&self, index: i64) -> bool {
+        index >= 0 && (index as u64) < self.dbs.len() as u64
+    }
+}
+
+impl Default for Keyspace {
+    fn default() -> Keyspace {
+        Keyspace::new(DEFAULT_DATABASES)
+    }
+}
+
+/// Redis' default `databases` setting.
+pub const DEFAULT_DATABASES: usize = 16;
+
+/// One numbered database: a flat map of keys to values plus their expiries.
 #[derive(Default)]
 pub struct Db {
     data: HashMap<Bytes, Entry>,
@@ -229,8 +306,32 @@ impl Db {
             .count()
     }
 
+    /// Number of live keys carrying a TTL — the `expires=` field of
+    /// `INFO keyspace`.
+    pub fn expires_count(&self) -> usize {
+        let now = now_ms();
+        self.data
+            .values()
+            .filter(|e| matches!(e.expire_at, Some(at) if at > now))
+            .count()
+    }
+
     pub fn clear(&mut self) {
         self.data.clear();
+    }
+
+    /// Detach a key along with its expiry, for handing to another database.
+    /// Paired with [`Db::put`] to implement `MOVE` and `COPY ... DB`, both of
+    /// which carry the TTL across.
+    pub fn take(&mut self, key: &[u8]) -> Option<(Value, Option<u64>)> {
+        self.purge_if_expired(key);
+        self.data.remove(key).map(|e| (e.value, e.expire_at))
+    }
+
+    /// Insert a value with an explicit absolute expiry — the counterpart of
+    /// [`Db::take`], and unlike [`Db::set`] it does not clear the TTL.
+    pub fn put(&mut self, key: Bytes, value: Value, expire_at: Option<u64>) {
+        self.data.insert(key, Entry { value, expire_at });
     }
 
     /// Iterate live keys matching an optional glob pattern.
@@ -623,6 +724,48 @@ fn glob_inner(mut p: &[u8], mut s: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `pair` splits the backing Vec differently depending on index order, so
+    /// exercise both directions and confirm the halves are not transposed.
+    #[test]
+    fn keyspace_pair_returns_the_right_databases_either_way() {
+        let mut ks = Keyspace::new(16);
+        for (i, db) in ks.iter_mut().enumerate() {
+            db.set(
+                Bytes::from("who"),
+                Value::String(Bytes::from(i.to_string())),
+            );
+        }
+        let read = |db: &mut Db| match db.get(b"who") {
+            Some(Value::String(s)) => String::from_utf8_lossy(s).into_owned(),
+            _ => unreachable!(),
+        };
+
+        let (low, high) = ks.pair(2, 11);
+        assert_eq!((read(low), read(high)), ("2".into(), "11".into()));
+
+        // Descending: the same two databases, in the order asked for.
+        let (high, low) = ks.pair(11, 2);
+        assert_eq!((read(high), read(low)), ("11".into(), "2".into()));
+
+        // Adjacent indexes are the boundary case for the split point.
+        let (a, b) = ks.pair(6, 7);
+        assert_eq!((read(a), read(b)), ("6".into(), "7".into()));
+    }
+
+    #[test]
+    fn expires_count_tracks_only_live_volatile_keys() {
+        let mut db = Db::new();
+        db.set(Bytes::from("plain"), Value::String(Bytes::from("v")));
+        db.set(Bytes::from("future"), Value::String(Bytes::from("v")));
+        db.set(Bytes::from("past"), Value::String(Bytes::from("v")));
+        db.set_expire(b"future", now_ms() + 60_000);
+        db.set_expire(b"past", now_ms() - 1);
+
+        // The expired key counts as neither live nor expiring.
+        assert_eq!(db.expires_count(), 1);
+        assert_eq!(db.len(), 2);
+    }
 
     #[test]
     fn glob_basics() {

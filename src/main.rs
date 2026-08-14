@@ -44,6 +44,8 @@ struct Config {
     port_file: Option<String>,
     requirepass: Option<String>,
     maxclients: usize,
+    /// Number of `SELECT`able databases (Redis' `databases` config).
+    databases: usize,
     /// Log every command and reply (`--verbose`, `--loglevel verbose|debug`).
     verbose: bool,
 }
@@ -62,6 +64,7 @@ OPTIONS:
                                (useful with --port 0, so tooling can find it)
         --requirepass <PASS>   Require AUTH with this password
         --maxclients <N>       Maximum simultaneous connections (default: 10000)
+        --databases <N>        Number of SELECTable databases (default: 16)
         --verbose              Log every command and reply to stdout
         --loglevel <LEVEL>     nothing|warning|notice|verbose|debug
                                (default: notice; verbose and debug log every
@@ -87,6 +90,7 @@ fn parse_args() -> Result<Config, i32> {
         port_file: None,
         requirepass: None,
         maxclients: 10000,
+        databases: db::DEFAULT_DATABASES,
         verbose: false,
     };
     let mut args = std::env::args().skip(1);
@@ -132,6 +136,16 @@ fn parse_args() -> Result<Config, i32> {
                 Some(n) => cfg.maxclients = n,
                 None => {
                     eprintln!("meebis: --maxclients requires a number");
+                    return Err(1);
+                }
+            },
+            // Capped well above any plausible use: empty databases cost a map
+            // header each, but an unbounded value would still let a typo ask
+            // for gigabytes of them.
+            "--databases" => match args.next().and_then(|v| v.parse::<usize>().ok()) {
+                Some(n) if n >= 1 && n <= 16384 => cfg.databases = n,
+                _ => {
+                    eprintln!("meebis: --databases requires a number between 1 and 16384");
                     return Err(1);
                 }
             },
@@ -217,6 +231,7 @@ async fn run(cfg: Config) -> std::io::Result<()> {
         cfg.requirepass,
         local_addr.port(),
         cfg.maxclients,
+        cfg.databases,
         cfg.verbose,
         start,
     ));
@@ -244,7 +259,9 @@ async fn run(cfg: Config) -> std::io::Result<()> {
             let mut ticker = tokio::time::interval(Duration::from_secs(1));
             loop {
                 ticker.tick().await;
-                shared.db.lock().unwrap().sweep_expired();
+                for db in shared.db.lock().unwrap().iter_mut() {
+                    db.sweep_expired();
+                }
             }
         }
     });
@@ -286,6 +303,7 @@ async fn handle_connection(
                     addr: addr.to_string(),
                     name: String::new(),
                     resp3: false,
+                    db: 0,
                 },
             );
             false
@@ -306,6 +324,7 @@ async fn handle_connection(
         addr,
         name: bytes::Bytes::new(),
         resp3: false,
+        db_index: 0,
         authenticated: false,
         subscribed_channels: Default::default(),
         subscribed_patterns: Default::default(),

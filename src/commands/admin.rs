@@ -97,7 +97,11 @@ pub fn time() -> Frame {
     ])
 }
 
-pub fn info(shared: &Shared, conn: &crate::server::ConnState, keys: usize) -> Frame {
+pub fn info(
+    shared: &Shared,
+    conn: &crate::server::ConnState,
+    ks: &mut crate::db::Keyspace,
+) -> Frame {
     let uptime = shared.start.elapsed().as_secs();
     let clients = shared.clients.lock().unwrap().len();
     let cmds = shared.commands_processed.load(Ordering::Relaxed);
@@ -153,8 +157,17 @@ pub fn info(shared: &Shared, conn: &crate::server::ConnState, keys: usize) -> Fr
     s.push_str("\r\n# Cluster\r\n");
     s.push_str("cluster_enabled:0\r\n");
     s.push_str("\r\n# Keyspace\r\n");
-    if keys > 0 {
-        s.push_str(&format!("db0:keys={},expires=0,avg_ttl=0\r\n", keys));
+    // Redis lists only the databases that currently hold keys.
+    for (i, db) in ks.iter_mut().enumerate() {
+        let keys = db.len();
+        if keys > 0 {
+            s.push_str(&format!(
+                "db{}:keys={},expires={},avg_ttl=0\r\n",
+                i,
+                keys,
+                db.expires_count()
+            ));
+        }
     }
     let _ = conn;
     Frame::Bulk(Bytes::from(s))

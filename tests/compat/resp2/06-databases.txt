@@ -1,0 +1,160 @@
+FLUSHALL
+ECHO --select-bounds--
+SELECT 15
+SELECT 16
+SELECT -1
+SELECT notanumber
+SELECT 1 2
+SELECT 0
+ECHO --isolation--
+SET shared db0-value
+SELECT 1
+GET shared
+SET shared db1-value
+SELECT 0
+GET shared
+DBSIZE
+SELECT 1
+DBSIZE
+KEYS *
+SELECT 0
+ECHO --flushdb-vs-flushall--
+SELECT 2
+SET only-in-db2 x
+SELECT 0
+DBSIZE
+FLUSHDB
+DBSIZE
+SELECT 2
+DBSIZE
+SELECT 1
+DBSIZE
+FLUSHALL
+DBSIZE
+SELECT 2
+DBSIZE
+SELECT 0
+ECHO --move--
+SET mover payload
+MOVE mover 3
+EXISTS mover
+SELECT 3
+GET mover
+SELECT 0
+MOVE missing 3
+MOVE mover 0
+MOVE missing 0
+MOVE mover 99
+MOVE mover notanumber
+MOVE mover
+SET occupied here
+SELECT 3
+SET occupied there
+SELECT 0
+MOVE occupied 3
+GET occupied
+SELECT 3
+GET occupied
+SELECT 0
+ECHO --move-carries-ttl--
+SET ttlmover payload
+EXPIREAT ttlmover 33260817600
+MOVE ttlmover 4
+SELECT 4
+EXPIRETIME ttlmover
+SELECT 0
+ECHO --copy-same-db--
+FLUSHALL
+SET src original
+COPY src dst
+GET dst
+COPY src dst
+COPY src dst REPLACE
+COPY src src
+COPY src src REPLACE
+COPY missing anywhere
+ECHO --copy-cross-db--
+COPY src src DB 5
+SELECT 5
+GET src
+SELECT 0
+COPY src src DB 5
+COPY src src DB 5 REPLACE
+COPY src elsewhere DB 99
+COPY src elsewhere DB notanumber
+COPY src elsewhere DB
+COPY src elsewhere BOGUS
+ECHO --copy-carries-ttl--
+SET ttlsrc payload
+EXPIREAT ttlsrc 33260817600
+COPY ttlsrc ttlsrc DB 6
+SELECT 6
+EXPIRETIME ttlsrc
+SELECT 0
+TTL src
+ECHO --swapdb--
+FLUSHALL
+SET marker in-db0
+SELECT 7
+SET marker in-db7
+SELECT 0
+SWAPDB 0 7
+GET marker
+SELECT 7
+GET marker
+SELECT 0
+SWAPDB 0 0
+GET marker
+SWAPDB 0 99
+SWAPDB 99 0
+SWAPDB notanumber 0
+SWAPDB 0 notanumber
+SWAPDB 99 notanumber
+SWAPDB 0
+SWAPDB
+ECHO --select-in-multi--
+FLUSHALL
+SELECT 0
+MULTI
+SELECT 8
+SET queued yes
+EXEC
+DBSIZE
+GET queued
+SELECT 0
+DBSIZE
+ECHO --watch-is-per-database--
+FLUSHALL
+SET guard v1
+SELECT 9
+SET guard other-db
+SELECT 0
+WATCH guard
+SELECT 9
+SET guard changed-in-db9
+SELECT 0
+MULTI
+SET tx-ran yes
+EXEC
+GET tx-ran
+ECHO --watch-still-aborts-in-its-own-database--
+FLUSHALL
+SET guard v1
+WATCH guard
+SET guard v2
+MULTI
+SET tx-ran yes
+EXEC
+GET tx-ran
+ECHO --randomkey-and-scan-are-scoped--
+FLUSHALL
+SELECT 10
+SET lonely x
+SELECT 0
+RANDOMKEY
+SCAN 0
+SELECT 10
+RANDOMKEY
+SCAN 0
+SELECT 0
+FLUSHALL

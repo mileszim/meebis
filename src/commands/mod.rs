@@ -17,7 +17,7 @@ mod stream;
 mod string;
 mod zset;
 
-use crate::db::Db;
+use crate::db::Keyspace;
 use crate::resp::Frame;
 use crate::server::{ConnState, Shared};
 use bytes::Bytes;
@@ -108,8 +108,8 @@ pub fn handle(shared: &Shared, conn: &mut ConnState, args: Vec<Bytes>) -> Reply 
         "UNSUBSCRIBE" => Reply::Many(unsubscribe(shared, conn, &args, false)),
         "PUNSUBSCRIBE" => Reply::Many(unsubscribe(shared, conn, &args, true)),
         "RESET" => Reply::One(reset(shared, conn)),
-        "BZPOPMIN" => try_or_block_bzpop(shared, &args, true),
-        "BZPOPMAX" => try_or_block_bzpop(shared, &args, false),
+        "BZPOPMIN" => try_or_block_bzpop(shared, conn, &args, true),
+        "BZPOPMAX" => try_or_block_bzpop(shared, conn, &args, false),
         "XREAD" => try_or_block_xread(shared, conn, args),
         _ => Reply::One(execute(shared, conn, &name, &args)),
     }
@@ -117,7 +117,7 @@ pub fn handle(shared: &Shared, conn: &mut ConnState, args: Vec<Bytes>) -> Reply 
 
 /// Handle a `BZPOPMIN`/`BZPOPMAX`: try once, and if every key is empty either
 /// block (BLOCK/timeout supplied) or return the nil-array timeout reply.
-fn try_or_block_bzpop(shared: &Shared, args: &[Bytes], min: bool) -> Reply {
+fn try_or_block_bzpop(shared: &Shared, conn: &ConnState, args: &[Bytes], min: bool) -> Reply {
     if args.len() < 3 {
         return Reply::One(wrong_args(if min { "bzpopmin" } else { "bzpopmax" }));
     }
@@ -128,8 +128,9 @@ fn try_or_block_bzpop(shared: &Shared, args: &[Bytes], min: bool) -> Reply {
     };
     let keys: Vec<Bytes> = args[1..args.len() - 1].to_vec();
 
-    let mut db = shared.db.lock().unwrap();
-    match zset::bzpop_try(&mut db, &keys, min) {
+    let mut ks = shared.db.lock().unwrap();
+    let db = ks.db(conn.db_index);
+    match zset::bzpop_try(db, &keys, min) {
         Ok(Some(reply)) => Reply::One(reply),
         Err(e) => Reply::One(e),
         Ok(None) => Reply::Block(BlockReq {
@@ -147,14 +148,15 @@ fn try_or_block_xread(shared: &Shared, conn: &mut ConnState, args: Vec<Bytes>) -
     if block_ms.is_none() {
         return Reply::One(execute(shared, conn, "XREAD", &args));
     }
-    let mut db = shared.db.lock().unwrap();
+    let mut ks = shared.db.lock().unwrap();
+    let db = ks.db(conn.db_index);
     // Snapshot `$` against the current last_id, so subsequent retries look
     // for entries added *after* now, not after their own new last_id.
-    let resolved = match stream::resolve_dollar_ids(&mut db, &args) {
+    let resolved = match stream::resolve_dollar_ids(db, &args) {
         Ok(v) => v,
         Err(e) => return Reply::One(e),
     };
-    let first = stream::xread(&mut db, &resolved);
+    let first = stream::xread(db, &resolved);
     if !matches!(first, Frame::NullArray) {
         return Reply::One(first);
     }
@@ -193,19 +195,21 @@ fn parse_timeout_ms(arg: &Bytes) -> Result<Option<u64>, Frame> {
 /// return `Some(frame)` if it succeeded, `None` if the caller must keep waiting.
 pub fn retry_block(shared: &Shared, conn: &mut ConnState, req: &BlockReq) -> Option<Frame> {
     let name = String::from_utf8_lossy(&req.args[0]).to_ascii_uppercase();
-    let mut db = shared.db.lock().unwrap();
+    let mut ks = shared.db.lock().unwrap();
+    // Retries run against the database the connection had selected when it
+    // blocked, so a push into another database does not satisfy the wait.
     match name.as_str() {
         "BZPOPMIN" | "BZPOPMAX" => {
             let min = name == "BZPOPMIN";
             let keys = &req.args[1..req.args.len() - 1];
-            match zset::bzpop_try(&mut db, keys, min) {
+            match zset::bzpop_try(ks.db(conn.db_index), keys, min) {
                 Ok(Some(r)) => Some(r),
                 Ok(None) => None,
                 Err(e) => Some(e),
             }
         }
         "XREAD" => {
-            let frame = stream::xread(&mut db, &req.args);
+            let frame = stream::xread(ks.db(conn.db_index), &req.args);
             if matches!(frame, Frame::NullArray) {
                 None
             } else {
@@ -214,7 +218,7 @@ pub fn retry_block(shared: &Shared, conn: &mut ConnState, req: &BlockReq) -> Opt
         }
         _ => {
             // Not a supported blocking command; fall back to running it non-blocking.
-            Some(execute_locked(&mut db, shared, conn, &name, &req.args))
+            Some(execute_locked(&mut ks, shared, conn, &name, &req.args))
         }
     }
 }
@@ -225,8 +229,8 @@ pub fn retry_block(shared: &Shared, conn: &mut ConnState, req: &BlockReq) -> Opt
 /// that a whole command (and, for `EVAL`, a whole script) sees a consistent
 /// snapshot the way Redis' single thread does.
 fn execute(shared: &Shared, conn: &mut ConnState, name: &str, args: &[Bytes]) -> Frame {
-    let mut db = shared.db.lock().unwrap();
-    execute_locked(&mut db, shared, conn, name, args)
+    let mut ks = shared.db.lock().unwrap();
+    execute_locked(&mut ks, shared, conn, name, args)
 }
 
 /// Run a single command against an already-locked keyspace. Kept separate from
@@ -234,12 +238,37 @@ fn execute(shared: &Shared, conn: &mut ConnState, name: &str, args: &[Bytes]) ->
 /// each `redis.call` back here without re-locking (which would deadlock, since
 /// the keyspace mutex is not reentrant).
 pub(crate) fn execute_locked(
-    db: &mut Db,
+    ks: &mut Keyspace,
     shared: &Shared,
     conn: &mut ConnState,
     name: &str,
     args: &[Bytes],
 ) -> Frame {
+    // Commands that span databases are resolved first, while the whole keyspace
+    // is still reachable. Narrowing to the selected database below borrows `ks`
+    // for the rest of the function, so these cannot live in the main match.
+    match name {
+        "SELECT" => return clientcmd::select(ks, shared, conn, args),
+        "SWAPDB" => return generic::swapdb(ks, args),
+        "MOVE" => return generic::move_key(ks, conn, args),
+        "COPY" => return generic::copy(ks, conn, args),
+        "FLUSHALL" => {
+            ks.clear_all();
+            return Frame::ok();
+        }
+        "INFO" => return admin::info(shared, conn, ks),
+        // Scripts run against the whole keyspace: `redis.call('select', n)` is
+        // legal inside one (and scoped to it).
+        "EVAL" | "EVAL_RO" => {
+            return scripting::eval(ks, shared, conn, args, scripting::Source::Body)
+        }
+        "EVALSHA" | "EVALSHA_RO" => {
+            return scripting::eval(ks, shared, conn, args, scripting::Source::Sha)
+        }
+        _ => {}
+    }
+
+    let db = ks.db(conn.db_index);
     match name {
         // --- strings ---
         "GET" => string::get(db, args),
@@ -288,8 +317,8 @@ pub(crate) fn execute_locked(
         "RENAME" => generic::rename(db, args, false),
         "RENAMENX" => generic::rename(db, args, true),
         "RANDOMKEY" => generic::randomkey(db, args),
+        // COPY and MOVE are handled above — both can target another database.
         "TOUCH" => generic::exists(db, args),
-        "COPY" => generic::copy(db, args),
 
         // --- hashes ---
         "HSET" | "HMSET" => hash::hset(db, args, name == "HMSET"),
@@ -374,7 +403,6 @@ pub(crate) fn execute_locked(
         "ECHO" => clientcmd::echo(args),
         "HELLO" => clientcmd::hello(shared, conn, args),
         "AUTH" => clientcmd::auth(shared, conn, args),
-        "SELECT" => clientcmd::select(args),
         "CLIENT" => clientcmd::client(shared, conn, args),
 
         // --- pub/sub (non-subscribe) ---
@@ -384,9 +412,8 @@ pub(crate) fn execute_locked(
         // --- server / admin ---
         "COMMAND" => admin::command(args),
         "CONFIG" => admin::config(shared, args),
-        "INFO" => admin::info(shared, conn, db.len()),
         "DBSIZE" => Frame::Integer(db.len() as i64),
-        "FLUSHDB" | "FLUSHALL" => {
+        "FLUSHDB" => {
             db.clear();
             Frame::ok()
         }
@@ -401,8 +428,7 @@ pub(crate) fn execute_locked(
         "XTRIM" => stream::xtrim(db, args),
 
         // --- scripting ---
-        "EVAL" | "EVAL_RO" => scripting::eval(db, shared, conn, args, scripting::Source::Body),
-        "EVALSHA" | "EVALSHA_RO" => scripting::eval(db, shared, conn, args, scripting::Source::Sha),
+        // EVAL/EVALSHA are handled above; they need the whole keyspace.
         "SCRIPT" => scripting::script(shared, args),
         "TIME" => admin::time(),
         "DEBUG" => admin::debug(db, args),
@@ -411,7 +437,6 @@ pub(crate) fn execute_locked(
         "LOLWUT" => Frame::bulk("meebis: a disposable Redis for ephemeral dev work\n"),
         "SAVE" | "BGSAVE" | "BGREWRITEAOF" => Frame::ok(),
         "LASTSAVE" => Frame::Integer((crate::db::now_ms() / 1000) as i64),
-        "SWAPDB" => Frame::ok(),
         "MEMORY" => admin::memory(db, args),
         "SHUTDOWN" => {
             // A dev tool honoring SHUTDOWN simply exits.
@@ -471,11 +496,14 @@ fn watch(shared: &Shared, conn: &mut ConnState, args: &[Bytes]) -> Frame {
         return Frame::err("WATCH inside MULTI is not allowed");
     }
     {
-        let mut db = shared.db.lock().unwrap();
+        // A watch belongs to the database that was selected when it was taken.
+        let dbi = conn.db_index;
+        let mut ks = shared.db.lock().unwrap();
+        let db = ks.db(dbi);
         for key in &args[1..] {
             let fp = db.fingerprint(key);
             conn.watched
-                .insert(key.clone(), (fp.is_some(), fp.unwrap_or(0)));
+                .insert((dbi, key.clone()), (fp.is_some(), fp.unwrap_or(0)));
         }
     }
     Frame::ok()
@@ -496,9 +524,9 @@ fn exec(shared: &Shared, conn: &mut ConnState) -> Frame {
 
     // Abort if any watched key changed since it was watched.
     if !watched.is_empty() {
-        let mut db = shared.db.lock().unwrap();
-        for (key, snapshot) in &watched {
-            let fp = db.fingerprint(key);
+        let mut ks = shared.db.lock().unwrap();
+        for ((dbi, key), snapshot) in &watched {
+            let fp = ks.db(*dbi).fingerprint(key);
             let current = (fp.is_some(), fp.unwrap_or(0));
             if current != *snapshot {
                 return Frame::NullArray;
