@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/mileszim/meebis/compare/v0.6.0...v0.7.0) (2026-08-14)
+
+
+### Features
+
+* support Redis' 16 numbered databases ([#13](https://github.com/mileszim/meebis/issues/13)) ([bcd2bfa](https://github.com/mileszim/meebis/commit/bcd2bfafe6917151b7737b79c30c7491f9a5508a))
+
 ## [0.6.0](https://github.com/mileszim/meebis/compare/v0.5.0...v0.6.0) (2026-08-13)
 
 
