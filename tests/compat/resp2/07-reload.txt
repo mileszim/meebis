@@ -1,0 +1,42 @@
+SET str hello
+SET num 1234567890
+APPEND str " world"
+RPUSH list a b c b a
+SADD set alpha beta gamma
+SADD ints 1 2 3 -7 42
+HSET hash f1 v1 f2 v2
+ZADD zset 1 one 2.5 two -3 three
+ZADD edges inf hi -inf lo 0 mid
+XADD stream 100-1 kind created
+XADD stream 100-2 kind updated other field
+XADD stream 200-7 only value
+EXPIRE str 86400
+DEBUG RELOAD
+GET str
+GET num
+TYPE str
+LRANGE list 0 -1
+LLEN list
+SCARD set
+SISMEMBER set beta
+SCARD ints
+SISMEMBER ints 42
+HGET hash f1
+HGET hash f2
+HLEN hash
+ZRANGE zset 0 -1 WITHSCORES
+ZSCORE zset two
+ZRANGE edges 0 -1 WITHSCORES
+ZSCORE edges hi
+ZSCORE edges lo
+XLEN stream
+XRANGE stream - +
+DBSIZE
+TTL str
+PERSIST str
+TTL str
+DEBUG RELOAD
+TTL str
+XADD stream 100-1 too small
+XADD stream 300-1 kind fresh
+XLEN stream

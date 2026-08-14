@@ -136,6 +136,7 @@ pub fn info(
     s.push_str("loading:0\r\n");
     s.push_str("rdb_changes_since_last_save:0\r\n");
     s.push_str("rdb_bgsave_in_progress:0\r\n");
+    s.push_str(&format!("rdb_last_save_time:{}\r\n", shared.last_save()));
     s.push_str("rdb_last_bgsave_status:ok\r\n");
     s.push_str("aof_enabled:0\r\n");
     s.push_str("aof_last_bgrewrite_status:ok\r\n");
@@ -173,7 +174,7 @@ pub fn info(
     Frame::Bulk(Bytes::from(s))
 }
 
-pub fn debug(db: &mut Db, args: &[Bytes]) -> Frame {
+pub fn debug(ks: &mut crate::db::Keyspace, db_index: usize, args: &[Bytes]) -> Frame {
     if args.len() < 2 {
         return wrong_args("debug");
     }
@@ -182,12 +183,27 @@ pub fn debug(db: &mut Db, args: &[Bytes]) -> Frame {
             if args.len() < 3 {
                 return wrong_args("debug");
             }
-            match db.get(&args[2]) {
+            match ks.db(db_index).get(&args[2]) {
                 Some(v) => Frame::Simple(format!(
                     "Value at:0x0 refcount:1 encoding:{} serializedlength:8 lru:0 lru_seconds_idle:0",
                     encoding_of(v)
                 )),
                 None => Frame::err("no such key"),
+            }
+        }
+        // Round-trip the whole keyspace through the RDB codec, as Redis does.
+        // This is also the cheapest self-check meebis has: anything it can
+        // write but not read back fails visibly here rather than at load time
+        // on someone's next boot.
+        "RELOAD" => {
+            let image = crate::rdb::to_bytes(ks);
+            let mut fresh = crate::db::Keyspace::new(ks.len());
+            match crate::rdb::from_bytes(&image, &mut fresh) {
+                Ok(_) => {
+                    *ks = fresh;
+                    Frame::ok()
+                }
+                Err(e) => Frame::err(format!("DEBUG RELOAD failed: {e}")),
             }
         }
         "JMAP"
@@ -196,10 +212,47 @@ pub fn debug(db: &mut Db, args: &[Bytes]) -> Frame {
         | "STRINGMATCH-LEN"
         | "CHANGE-REPL-ID"
         | "SLEEP"
-        | "FLUSHALL"
-        | "RELOAD" => Frame::ok(),
+        | "FLUSHALL" => Frame::ok(),
         _ => Frame::ok(),
     }
+}
+
+/// `SAVE` / `BGSAVE`. meebis is single-threaded, so the "background" form
+/// writes synchronously and then reports what Redis reports — the file is on
+/// disk by the time the client sees the reply, which is strictly stronger than
+/// the guarantee the real reply makes.
+pub fn save(shared: &Shared, ks: &mut crate::db::Keyspace, background: bool) -> Frame {
+    let done = |()| {
+        if background {
+            Frame::Simple("Background saving started".into())
+        } else {
+            Frame::ok()
+        }
+    };
+    match shared.save_dump(ks) {
+        // No dump file configured. Redis would still write one; meebis has
+        // nowhere to put it, so report success without inventing a path.
+        None => done(()),
+        Some(Ok(())) => {
+            crate::log::note("keyspace saved");
+            done(())
+        }
+        Some(Err(e)) => Frame::err(format!("failed to save: {e}")),
+    }
+}
+
+/// `SHUTDOWN [NOSAVE|SAVE]`. Saves first unless told not to, and refuses to
+/// exit if that save fails — losing the keyspace to a full disk while doing
+/// exactly what the operator asked would be the worst outcome here.
+pub fn shutdown(shared: &Shared, ks: &mut crate::db::Keyspace, args: &[Bytes]) -> Frame {
+    let nosave = args[1..].iter().any(|a| upper(a) == "NOSAVE");
+    if !nosave {
+        if let Some(Err(e)) = shared.save_dump(ks) {
+            crate::log::note(&format!("refusing to shut down: {e}"));
+            return Frame::err(format!("Errors trying to SHUTDOWN. Check logs. ({e})"));
+        }
+    }
+    std::process::exit(0);
 }
 
 pub fn object(db: &mut Db, args: &[Bytes]) -> Frame {

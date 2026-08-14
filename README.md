@@ -5,7 +5,9 @@ ephemeral local work.
 
 Spin one up per git worktree, point a couple of processes at it, then throw it
 away. It boots clean every time, keeps everything in RAM, and forgets it all on
-exit. There is no persistence, no config file, and nothing to clean up.
+exit. There is no config file and nothing to clean up. If you *want* the
+keyspace to survive a restart, `--dumpfile` reads and writes Redis' own RDB
+snapshot format — see [Snapshots](#snapshots-dumpfile).
 
 - **Fast** — matches real Redis throughput (~110–130k ops/sec single-threaded,
   sub-millisecond latency).
@@ -14,7 +16,8 @@ exit. There is no persistence, no config file, and nothing to clean up.
 - **Compatible** — speaks RESP2 and RESP3 and a broad slice of the Redis
   command surface. `redis-cli`, `redis-py`, and other standard client libraries
   just work, verified byte-for-byte against Redis 7.2.
-- **Disposable** — clean on boot, gone on exit. No durability, by design.
+- **Disposable** — clean on boot, gone on exit, unless you hand it a snapshot
+  to load and save. Not durable either way, by design.
 
 It is *not* a Redis replacement for production. It's a dev tool.
 
@@ -85,6 +88,10 @@ r.set("hello", "world")
 | `--port-file <PATH>` | *(none)* | Write the actual listen port to `<PATH>` on boot |
 | `--requirepass <PASS>` | *(none)* | Require `AUTH` before most commands |
 | `--maxclients <N>` | `10000` | Maximum simultaneous connections |
+| `--databases <N>` | `16` | Number of `SELECT`able databases |
+| `--dumpfile <PATH>` | *(none)* | Load this RDB snapshot at boot, write it on exit (see [Snapshots](#snapshots-dumpfile)) |
+| `--dir <DIR>` / `--dbfilename <NAME>` | `.` / `dump.rdb` | Redis' two-part spelling of `--dumpfile` |
+| `--dumpfile-strict` | *(off)* | Refuse to start when a dump exists but cannot be loaded |
 | `--verbose` | *(off)* | Log every command and reply (see [Verbose logging](#verbose-logging)) |
 | `--loglevel <LEVEL>` | `notice` | `nothing`/`warning`/`notice`/`verbose`/`debug`; `verbose` and `debug` are the same as `--verbose` |
 | `-h`, `--help` / `-v`, `--version` | | Print help / version |
@@ -220,11 +227,67 @@ both of which carry the TTL over, and `SWAPDB` exchanges two wholesale.
 Pub/Sub is global, as in Redis: a message published on one database is delivered
 to subscribers on all of them.
 
+## Snapshots (`--dumpfile`)
+
+By default nothing touches the disk. Point meebis at a dump file and it will
+load that snapshot at boot and write it back on the way out:
+
+```sh
+meebis --port 6400 --dumpfile .meebis/dump.rdb
+```
+
+```
+meebis 0.7.0 ready on 127.0.0.1:6400 (pid 12345) — in-memory, snapshotting to .meebis/dump.rdb
+```
+
+The file is Redis' own **RDB format**, not a meebis invention, so it moves in
+both directions:
+
+```sh
+# Seed a worktree from a snapshot a real Redis wrote
+redis-cli -p 6379 save
+meebis --port 6400 --dumpfile /var/lib/redis/dump.rdb
+
+# ...or hand meebis' state to a real redis-server
+redis-cli -p 6400 shutdown
+redis-server --dir .meebis --dbfilename dump.rdb
+```
+
+Redis' own `--dir` / `--dbfilename` spelling works too, for tooling that already
+sets them, and `CONFIG GET dir dbfilename` reports the real values.
+
+The snapshot is written on a clean exit (`SIGINT`, `SIGTERM`, `SHUTDOWN`) and on
+demand via `SAVE` / `BGSAVE`. meebis is single-threaded, so `BGSAVE` writes
+synchronously and then returns Redis' reply — the file is already on disk when
+the client hears back.
+
+**This is not durability.** The keyspace still lives only in RAM, there are no
+periodic save points, and a `kill -9` loses everything since the last save. What
+it buys is carrying state *across* a restart or *between* servers.
+
+A few things worth knowing:
+
+- **Reading accepts anything; writing stays simple.** meebis reads every
+  encoding across RDB versions 1–11 — listpacks, quicklists, ziplists, intsets,
+  LZF-compressed strings — because Redis picks those and meebis has to cope. It
+  *writes* only the flat, oldest-spelling encodings, which Redis 7.2+ still
+  loads. Dumps are therefore a little larger than Redis' own.
+- **A dump that won't load doesn't block boot.** meebis logs the reason, renames
+  the unreadable file to `<name>.unreadable-<pid>` so the next save can't destroy
+  it, and starts with an empty keyspace. `--dumpfile-strict` makes it exit
+  instead, the way Redis does.
+- **Consumer groups and functions are dropped**, with a warning, since meebis
+  models neither. Everything else — every value type, TTLs, and all
+  `--databases` — round-trips.
+- **`DEBUG RELOAD`** runs the whole keyspace through the same codec in memory,
+  which is how the test suite checks the two halves agree.
+
 ## Deliberately not supported
 
 This is a small dev tool, so some Redis features are intentionally absent:
 
-- **Persistence** (RDB/AOF) — everything is in memory and lost on exit.
+- **Durable persistence** — `--dumpfile` reads and writes RDB snapshots, but
+  there are no save points, no AOF, and no crash safety.
 - **Stream consumer groups** (`XGROUP`, `XREADGROUP`, `XACK`, `XPENDING`,
   `XCLAIM`, `XAUTOCLAIM`) — `XADD`/`XREAD`/`XRANGE`/`XTRIM`/`XDEL` are
   supported; groups are not.

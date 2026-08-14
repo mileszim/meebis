@@ -1,8 +1,10 @@
 //! The in-memory keyspace: values, expiry, and the sorted-set type.
 //!
-//! There is deliberately no persistence and no durability. A single
-//! [`Keyspace`] — Redis' numbered databases — is shared behind one mutex; every
-//! command locks it mutably, which lets us purge expired keys lazily on access.
+//! There is deliberately no durability here: the keyspace lives in RAM, and
+//! [`crate::rdb`] can snapshot it to a file on the way out, but nothing in this
+//! module knows or cares about that. A single [`Keyspace`] — Redis' numbered
+//! databases — is shared behind one mutex; every command locks it mutably,
+//! which lets us purge expired keys lazily on access.
 
 use bytes::Bytes;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -167,6 +169,11 @@ impl Keyspace {
     /// every caller has just parsed one off the wire and must reject negatives.
     pub fn is_valid(&self, index: i64) -> bool {
         index >= 0 && (index as u64) < self.dbs.len() as u64
+    }
+
+    /// How many databases this server was configured with.
+    pub fn len(&self) -> usize {
+        self.dbs.len()
     }
 }
 
@@ -348,6 +355,17 @@ impl Db {
     /// All live keys (used by SCAN, which we implement as a full snapshot).
     pub fn all_keys(&self) -> Vec<Bytes> {
         self.keys_matching(None)
+    }
+
+    /// Every live key with its value and absolute expiry, for RDB
+    /// serialization. Borrows rather than cloning: a snapshot of a large
+    /// keyspace should not double its memory on the way out.
+    pub fn iter_live(&self) -> impl Iterator<Item = (&Bytes, &Value, Option<u64>)> {
+        let now = now_ms();
+        self.data
+            .iter()
+            .filter(move |(_, e)| !matches!(e.expire_at, Some(at) if at <= now))
+            .map(|(k, e)| (k, &e.value, e.expire_at))
     }
 
     /// A content fingerprint for a key, used by `WATCH` to detect changes.
