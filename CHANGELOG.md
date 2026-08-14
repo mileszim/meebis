@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/mileszim/meebis/compare/v0.7.0...v0.8.0) (2026-08-14)
+
+
+### Features
+
+* read and write Redis RDB dump files via --dumpfile ([#15](https://github.com/mileszim/meebis/issues/15)) ([59dedf4](https://github.com/mileszim/meebis/commit/59dedf4f98b7a23c81f0c83d947b48623b9a9406))
+
 ## [0.7.0](https://github.com/mileszim/meebis/compare/v0.6.0...v0.7.0) (2026-08-14)
 
 
