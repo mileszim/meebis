@@ -42,6 +42,12 @@ cargo binstall meebis           # prebuilt binary, no compile (needs cargo-binst
 cargo install meebis            # build from source (crates.io)
 ```
 
+**Docker** (linux/amd64 & linux/arm64) — see [Docker](#docker) for Compose:
+
+```sh
+docker run --rm -p 6379:6379 ghcr.io/mileszim/meebis
+```
+
 **Prebuilt binaries** for macOS and Linux (arm64 & x86_64) are attached to every
 [release](https://github.com/mileszim/meebis/releases/latest) as `.tar.xz`
 archives, with `sha256` checksums.
@@ -171,6 +177,77 @@ redis-cli -p 6400 config set loglevel notice    # stop
 Logging is off by default and gated on a single atomic load, so a quiet server
 runs at full speed; with it on, expect to give up some throughput to the
 formatting and writing (~15% under `redis-benchmark`).
+
+## Docker
+
+Multi-arch images (`linux/amd64`, `linux/arm64`) are published to the GitHub
+Container Registry on every release:
+
+```sh
+docker run --rm -p 6379:6379 ghcr.io/mileszim/meebis
+```
+
+| Tag | Points at |
+|-----|-----------|
+| `0.8.0` | that exact release |
+| `0.8` | the newest patch of that minor |
+| `latest` | the tip of `main` |
+| `main`, `sha-<short>` | the tip of `main`, and each individual commit |
+
+`latest` follows `main` rather than the newest release, so pin to `0.8` (or a
+full version) for anything you want to stay put.
+
+The image is built `FROM scratch` around a statically linked musl binary — no
+shell, no package manager, nothing but meebis, at roughly the size of the binary
+itself. The entrypoint already passes `--bind 0.0.0.0`, so the server is
+reachable from outside the container; any flags you add are appended to it:
+
+```sh
+docker run --rm -p 6400:6379 ghcr.io/mileszim/meebis --requirepass hunter2 --verbose
+```
+
+### Compose
+
+meebis is a drop-in swap for a `redis` service. The whole point is that there is
+nothing else to configure — no volume, no `command:` override, no health-check
+wait, because a fresh instance is the desired state every time:
+
+```yaml
+services:
+  redis:
+    image: ghcr.io/mileszim/meebis:0.8
+    ports: ["6379:6379"]
+
+  app:
+    build: .
+    environment:
+      REDIS_URL: redis://redis:6379
+    depends_on: [redis]
+```
+
+Two things to know, both consequences of the `scratch` image:
+
+- **No in-container health check.** There is no shell and no `redis-cli` inside,
+  so the usual `test: ["CMD", "redis-cli", "ping"]` will not run. meebis binds
+  its port before it prints its banner and does no startup work unless you pass
+  `--dumpfile`, so plain `depends_on` is normally enough; if you need a real
+  gate, run the probe from the depending service instead.
+- **`docker exec` gets you nothing.** Use `redis-cli` from the host (or another
+  service) against the published port.
+
+### Snapshots in a container
+
+Nothing is written to disk by default. To carry a keyspace across container
+restarts, mount a directory and point `--dumpfile` into it:
+
+```sh
+docker run --rm -p 6379:6379 -v "$PWD/.meebis:/data" \
+  ghcr.io/mileszim/meebis --dumpfile /data/dump.rdb
+```
+
+`docker stop` sends `SIGTERM`, which meebis catches and snapshots on; `docker
+kill` does not. See [Snapshots](#snapshots-dumpfile) for what that file is and
+is not.
 
 ## Supported commands
 
