@@ -16,12 +16,17 @@ name = "meebis"
 path = "src/main.rs"
 
 [dependencies]
-tokio = { version = "1", features = ["rt", "net", "io-util", "macros", "sync", "time", "signal"] }
+tokio = { version = "1", features = ["rt", "net", "io-util", "macros", "sync", "time", "signal", "process"] }
 bytes = "1"
 # Embedded Lua 5.1 (Redis' scripting engine version), compiled from vendored C
 # sources so EVAL/EVALSHA behave like real Redis. This is the one C dependency;
 # it requires a C compiler at build time (see the Dockerfile).
 mlua = { version = "0.10", features = ["lua51", "vendored"] }
+
+# `meebis run` forwards SIGINT/SIGTERM to the command it supervises, and
+# tokio's Child only offers SIGKILL. Already in the tree via tokio.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [profile.release]
 opt-level = 3

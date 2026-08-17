@@ -22,6 +22,7 @@ mod log;
 mod pubsub;
 mod rdb;
 mod resp;
+mod runner;
 mod server;
 mod sha1;
 
@@ -55,6 +56,9 @@ struct Config {
     /// Refuse to start when the dump exists but cannot be loaded, instead of
     /// setting it aside and starting empty.
     dumpfile_strict: bool,
+    /// `meebis run -- <command>`: the command to run against this instance,
+    /// which then lives exactly as long as the command does.
+    run: Option<runner::Spec>,
 }
 
 fn print_help() {
@@ -63,8 +67,33 @@ fn print_help() {
 
 USAGE:
     meebis [OPTIONS]
+    meebis run [OPTIONS] -- <COMMAND> [ARGS...]
+
+RUN:
+    `meebis run` starts a server, runs <COMMAND> against it, and shuts the
+    server down when the command exits — exiting with the command's own status.
+    The command is handed its connection details in the environment:
+
+        REDIS_URL    redis://127.0.0.1:<port>   (with the password, if any)
+        REDIS_HOST   the address to dial
+        REDIS_PORT   the port that was bound
+
+    Without an explicit --port the OS picks a free one, so any number of these
+    can run at once — one per worktree, or several in the same CI job — with no
+    port collisions and no cleanup:
+
+        meebis run -- npm test
+        meebis run --requirepass hunter2 -- ./bin/rails test
+        meebis run --env CACHE_URL -- pytest
+
+    Options for the server go before the `--`; everything after it belongs to
+    the command. meebis' own output goes to stderr in this mode, so the
+    command keeps stdout to itself.
 
 OPTIONS:
+        --env <NAME>           (run only, repeatable) also set <NAME> to the
+                               connection URL, for apps that read something
+                               other than REDIS_URL
     -p, --port <PORT>          Port to listen on (default: 6379)
         --bind <ADDR>          Address to bind (default: 127.0.0.1)
         --port-file <PATH>     Write the actual listen port to <PATH> on boot
@@ -113,13 +142,26 @@ fn parse_args() -> Result<Config, i32> {
         verbose: false,
         dumpfile: None,
         dumpfile_strict: false,
+        run: None,
     };
     // `--dir`/`--dbfilename` are Redis' two-part spelling of `--dumpfile`;
     // collected separately and combined once every argument has been seen, so
     // the two can appear in either order.
     let mut dir: Option<String> = None;
     let mut dbfilename: Option<String> = None;
-    let mut args = std::env::args().skip(1);
+    let mut args = std::env::args().skip(1).peekable();
+
+    // `run` is the one subcommand, and only valid as the first word. Its
+    // presence changes two defaults: the port becomes OS-assigned (so parallel
+    // invocations cannot collide) and `--` ends meebis' own options.
+    let run_mode = args.peek().map(|a| a == "run").unwrap_or(false);
+    if run_mode {
+        args.next();
+    }
+    let mut port_explicit = false;
+    let mut extra_env: Vec<String> = Vec::new();
+    let mut child: Option<(String, Vec<String>)> = None;
+
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => {
@@ -131,7 +173,10 @@ fn parse_args() -> Result<Config, i32> {
                 return Err(0);
             }
             "-p" | "--port" => match args.next().and_then(|v| v.parse::<u16>().ok()) {
-                Some(p) => cfg.port = p,
+                Some(p) => {
+                    cfg.port = p;
+                    port_explicit = true;
+                }
                 None => {
                     eprintln!("meebis: --port requires a valid port number");
                     return Err(1);
@@ -214,10 +259,57 @@ fn parse_args() -> Result<Config, i32> {
                     return Err(1);
                 }
             },
+            "--env" if run_mode => match args.next() {
+                Some(name) => extra_env.push(name),
+                None => {
+                    eprintln!("meebis: --env requires a variable name");
+                    return Err(1);
+                }
+            },
+            "--env" => {
+                eprintln!("meebis: --env is only meaningful with `meebis run`");
+                return Err(1);
+            }
+            // Everything past `--` is the command, including anything that
+            // looks like one of our own flags.
+            "--" if run_mode => {
+                match args.next() {
+                    Some(command) => child = Some((command, args.by_ref().collect())),
+                    None => {
+                        eprintln!("meebis: run: `--` must be followed by a command to run");
+                        return Err(1);
+                    }
+                }
+                break;
+            }
             other => {
                 eprintln!("meebis: unknown option '{other}' (try --help)");
                 return Err(1);
             }
+        }
+    }
+
+    if run_mode {
+        match child {
+            Some((command, args)) => {
+                cfg.run = Some(runner::Spec {
+                    command,
+                    args,
+                    extra_env,
+                })
+            }
+            None => {
+                eprintln!(
+                    "meebis: run: expected `meebis run [options] -- <command> [args...]`\n\
+                     meebis: run: for example, `meebis run -- npm test`"
+                );
+                return Err(1);
+            }
+        }
+        // The point of `run` is that several can run at once, so default to an
+        // OS-assigned port rather than to 6379, which would collide.
+        if !port_explicit {
+            cfg.port = 0;
         }
     }
 
@@ -249,14 +341,14 @@ fn load_dump(shared: &Shared, path: &std::path::Path, strict: bool) -> Result<()
     let mut ks = shared.db.lock().unwrap();
     match rdb::load(path, &mut ks) {
         Ok(None) => {
-            println!("meebis: no dump at {} yet — starting empty", path.display());
+            crate::out!("meebis: no dump at {} yet — starting empty", path.display());
         }
         Ok(Some(stats)) => {
             let from = stats
                 .writer_version()
                 .map(|v| format!(" (written by {v})"))
                 .unwrap_or_default();
-            println!(
+            crate::out!(
                 "meebis: loaded {} key(s) from {}{}{}",
                 stats.keys,
                 path.display(),
@@ -320,6 +412,12 @@ fn main() {
         Err(code) => std::process::exit(code),
     };
 
+    // Under `run` the wrapped command owns stdout; everything meebis has to say
+    // goes to stderr so the two do not interleave.
+    if cfg.run.is_some() {
+        log::use_stderr();
+    }
+
     // A single-threaded runtime keeps the per-instance footprint tiny (one OS
     // thread), which matters when running dozens of these at once. Command
     // execution is serialized behind one mutex, just like Redis.
@@ -328,13 +426,13 @@ fn main() {
         .build()
         .expect("failed to build tokio runtime");
 
-    if let Err(e) = rt.block_on(run(cfg)) {
+    if let Err(e) = rt.block_on(serve(cfg)) {
         eprintln!("meebis: {e}");
         std::process::exit(1);
     }
 }
 
-async fn run(cfg: Config) -> std::io::Result<()> {
+async fn serve(cfg: Config) -> std::io::Result<()> {
     let start = Instant::now();
 
     let bind_addr = format!("{}:{}", cfg.bind, cfg.port);
@@ -353,6 +451,9 @@ async fn run(cfg: Config) -> std::io::Result<()> {
         }
     }
 
+    // Kept for the child's REDIS_URL; the original moves into `Shared`.
+    let password = cfg.requirepass.clone();
+
     let shared = Arc::new(Shared::new(
         cfg.requirepass,
         local_addr.port(),
@@ -369,7 +470,7 @@ async fn run(cfg: Config) -> std::io::Result<()> {
         }
     }
 
-    println!(
+    crate::out!(
         "meebis {} ready on {} (pid {}) — {}",
         VERSION,
         local_addr,
@@ -382,11 +483,6 @@ async fn run(cfg: Config) -> std::io::Result<()> {
     if cfg.verbose {
         log::note("verbose logging on — every command and reply is logged");
     }
-
-    // Snapshot and exit on Ctrl-C and on SIGTERM (how a container or a
-    // supervisor stops us). Without a dump file there is nothing to flush and
-    // this is the same immediate exit as before.
-    spawn_signal_handler(shared.clone());
 
     // Periodically drop keys whose TTL has elapsed so memory doesn't creep.
     tokio::spawn({
@@ -402,6 +498,50 @@ async fn run(cfg: Config) -> std::io::Result<()> {
         }
     });
 
+    let Some(spec) = cfg.run else {
+        // Snapshot and exit on Ctrl-C and on SIGTERM (how a container or a
+        // supervisor stops us). Without a dump file there is nothing to flush
+        // and this is the same immediate exit as before.
+        spawn_signal_handler(shared.clone());
+        accept_loop(listener, shared).await;
+        return Ok(());
+    };
+
+    // `run` mode: this instance exists for exactly one command. Signals go to
+    // the supervisor instead of `spawn_signal_handler`, because the child needs
+    // its own chance to shut down — exiting out from under it would strand it.
+    crate::out!("meebis: running: {}", spec.display());
+    let host = runner::connect_host(&cfg.bind).to_string();
+    let child = match runner::spawn(&spec, &host, local_addr.port(), password.as_deref()) {
+        Ok(child) => child,
+        Err(e) => {
+            eprintln!("meebis: run: could not start `{}`: {e}", spec.command);
+            // The shell's "command not found", which is what this nearly
+            // always is.
+            std::process::exit(127);
+        }
+    };
+
+    let status = tokio::select! {
+        _ = accept_loop(listener, shared.clone()) => unreachable!("the accept loop never returns"),
+        status = runner::supervise(child) => status,
+    };
+
+    // The command is finished, so the instance has done its job. Flush the
+    // snapshot exactly as a clean shutdown would, then take on the command's
+    // exit code so `meebis run -- <cmd>` is transparent to whatever called it.
+    if let Some(result) = shared.save_dump_locking() {
+        match result {
+            Ok(()) => log::note("keyspace saved"),
+            Err(e) => eprintln!("meebis: could not save: {e}"),
+        }
+    }
+    std::process::exit(status);
+}
+
+/// Accept connections forever. Split out so `run` mode can race it against the
+/// command it is supervising.
+async fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
     loop {
         let (stream, addr) = match listener.accept().await {
             Ok(pair) => pair,
