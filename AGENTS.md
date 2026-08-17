@@ -26,6 +26,8 @@ src/
   db.rs               keyspace, Value types, expiry, sorted set, glob match
   server.rs           shared state + per-connection state
   pubsub.rs           pub/sub registry
+  runner.rs           `meebis run`: the supervised child and its environment
+  unixsocket.rs       `--unixsocket`: binding, stale sockets, cleanup
   commands/
     mod.rs            dispatch, auth gate, transactions, pub/sub commands
     string.rs bitops.rs generic.rs hash.rs list.rs set.rs zset.rs

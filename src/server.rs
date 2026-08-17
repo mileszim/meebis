@@ -5,7 +5,6 @@ use crate::pubsub::PubSub;
 use crate::resp::Frame;
 use bytes::Bytes;
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -52,14 +51,19 @@ pub struct Shared {
     /// Seeded with boot time, exactly as Redis does.
     last_save: AtomicU64,
     pub port: u16,
+    /// The unix socket this server is listening on, when `--unixsocket` asked
+    /// for one. Kept so the exit paths can unlink it.
+    pub unixsocket: Option<PathBuf>,
     pub maxclients: usize,
     pub start: Instant,
 }
 
 impl Shared {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         requirepass: Option<String>,
         port: u16,
+        unixsocket: Option<PathBuf>,
         maxclients: usize,
         databases: usize,
         verbose: bool,
@@ -104,6 +108,16 @@ impl Shared {
             ("loglevel", if verbose { "verbose" } else { "notice" }),
             ("dir", dir.as_str()),
             ("dbfilename", dbfilename.as_str()),
+            // Redis reports this whether or not a socket is in use, with the
+            // empty string standing for "TCP only".
+            (
+                "unixsocket",
+                unixsocket
+                    .as_ref()
+                    .map(|p| p.to_string_lossy())
+                    .unwrap_or_default()
+                    .as_ref(),
+            ),
         ] {
             config.insert(k.to_string(), v.to_string());
         }
@@ -123,8 +137,19 @@ impl Shared {
             dumpfile,
             last_save: AtomicU64::new(crate::db::now_ms() / 1000),
             port,
+            unixsocket,
             maxclients,
             start,
+        }
+    }
+
+    /// Unlink the unix socket, if there is one, on the way out. Every path that
+    /// ends the process deliberately calls this; a process that dies without
+    /// getting the chance leaves the file behind, which the next boot clears.
+    pub fn cleanup_unixsocket(&self) {
+        #[cfg(unix)]
+        if let Some(path) = &self.unixsocket {
+            crate::unixsocket::cleanup(path);
         }
     }
 
@@ -193,7 +218,9 @@ pub struct ClientInfo {
 /// State owned by a single connection's task.
 pub struct ConnState {
     pub id: u64,
-    pub addr: SocketAddr,
+    /// How this client is reported by `CLIENT LIST` — `host:port` for a TCP
+    /// peer, and the socket path with Redis' placeholder `:0` for a unix one.
+    pub addr: String,
     pub name: Bytes,
     /// Whether the client negotiated RESP3 via `HELLO 3`.
     pub resp3: bool,

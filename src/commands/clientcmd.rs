@@ -180,7 +180,7 @@ pub fn client(shared: &Shared, conn: &mut ConnState, args: &[Bytes]) -> Frame {
         "INFO" => {
             let me = ClientInfo {
                 id: conn.id,
-                addr: conn.addr.to_string(),
+                addr: conn.addr.clone(),
                 name: String::from_utf8_lossy(&conn.name).into_owned(),
                 resp3: conn.resp3,
                 db: conn.db_index,
@@ -210,10 +210,18 @@ pub(super) fn sync_registry_db(shared: &Shared, conn: &ConnState) {
 }
 
 fn format_client_line(c: &ClientInfo) -> String {
+    // Redis reports a unix client's local address as the socket itself, which
+    // is also the only truthful answer here; the TCP side keeps the fixed
+    // placeholder it has always used.
+    let laddr = match c.addr.starts_with('/') {
+        true => c.addr.as_str(),
+        false => "127.0.0.1:0",
+    };
     format!(
-        "id={} addr={} laddr=127.0.0.1:0 fd=8 name={} age=0 idle=0 flags=N db={} sub=0 psub=0 ssub=0 multi=-1 watch=0 qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 tot-net-in=0 tot-net-out=0 rbs=1024 rbp=0 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd=client|info user=default redir=-1 resp={} lib-name= lib-ver=",
+        "id={} addr={} laddr={} fd=8 name={} age=0 idle=0 flags=N db={} sub=0 psub=0 ssub=0 multi=-1 watch=0 qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 tot-net-in=0 tot-net-out=0 rbs=1024 rbp=0 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd=client|info user=default redir=-1 resp={} lib-name= lib-ver=",
         c.id,
         c.addr,
+        laddr,
         c.name,
         c.db,
         if c.resp3 { 3 } else { 2 }
