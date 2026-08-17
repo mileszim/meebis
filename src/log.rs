@@ -18,7 +18,36 @@
 use crate::resp::Frame;
 use crate::server::{ConnState, Shared};
 use bytes::Bytes;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// Where meebis' own output goes. `meebis run` flips this to stderr so the
+/// wrapped command owns stdout — otherwise the banner and trace would land in
+/// the middle of whatever the command prints.
+static TO_STDERR: AtomicBool = AtomicBool::new(false);
+
+/// Route meebis' own output to stderr from here on.
+pub fn use_stderr() {
+    TO_STDERR.store(true, Ordering::Relaxed);
+}
+
+/// Write one of meebis' own lines to whichever stream is configured. Callers
+/// should prefer the [`out!`](crate::out) macro.
+pub fn emit(args: std::fmt::Arguments<'_>) {
+    if TO_STDERR.load(Ordering::Relaxed) {
+        eprintln!("{args}");
+    } else {
+        println!("{args}");
+    }
+}
+
+/// `println!` for anything meebis says about itself, honouring [`use_stderr`].
+/// Help and version text deliberately keep using `println!`: they are the
+/// output the user asked for, not commentary alongside a command.
+#[macro_export]
+macro_rules! out {
+    ($($arg:tt)*) => { $crate::log::emit(format_args!($($arg)*)) };
+}
 
 /// Longest value rendered before it is elided.
 const MAX_VALUE: usize = 96;
@@ -111,11 +140,11 @@ pub fn event(shared: &Shared, id: u64, msg: &str) {
 /// Log a server-wide note, not tied to any client. Unconditional — callers use
 /// it to report that logging itself just turned on or off.
 pub fn note(msg: &str) {
-    println!("{} * {}", now(), msg);
+    crate::out!("{} * {}", now(), msg);
 }
 
 fn line(id: u64, dir: char, body: &str) {
-    println!("{} #{} {} {}", now(), id, dir, clamp(body, MAX_LINE));
+    crate::out!("{} #{} {} {}", now(), id, dir, clamp(body, MAX_LINE));
 }
 
 // --- rendering ---

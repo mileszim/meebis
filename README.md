@@ -5,9 +5,11 @@ ephemeral local work.
 
 Spin one up per git worktree, point a couple of processes at it, then throw it
 away. It boots clean every time, keeps everything in RAM, and forgets it all on
-exit. There is no config file and nothing to clean up. If you *want* the
-keyspace to survive a restart, `--dumpfile` reads and writes Redis' own RDB
-snapshot format — see [Snapshots](#snapshots-dumpfile).
+exit. There is no config file and nothing to clean up. To skip the server
+lifecycle entirely, `meebis run -- npm test` lends one command an instance and
+takes it away again — see [`meebis run`](#meebis-run--one-command-one-instance).
+If you *want* the keyspace to survive a restart, `--dumpfile` reads and writes
+Redis' own RDB snapshot format — see [Snapshots](#snapshots-dumpfile).
 
 - **Fast** — matches real Redis throughput (~110–130k ops/sec single-threaded,
   sub-millisecond latency).
@@ -60,6 +62,7 @@ meebis                          # listen on 127.0.0.1:6379
 meebis --port 6400              # pick a port (the main thing you'll configure)
 meebis --port 0                 # let the OS choose a free port (printed on boot)
 meebis --requirepass hunter2    # require AUTH
+meebis run -- npm test          # or skip all that: see `meebis run` below
 ```
 
 ```
@@ -94,16 +97,64 @@ r.set("hello", "world")
 | `--dumpfile-strict` | *(off)* | Refuse to start when a dump exists but cannot be loaded |
 | `--verbose` | *(off)* | Log every command and reply (see [Verbose logging](#verbose-logging)) |
 | `--loglevel <LEVEL>` | `notice` | `nothing`/`warning`/`notice`/`verbose`/`debug`; `verbose` and `debug` are the same as `--verbose` |
+| `--env <NAME>` | *(none)* | `meebis run` only: also set `<NAME>` to the connection URL (repeatable) |
 | `-h`, `--help` / `-v`, `--version` | | Print help / version |
 
 Multiple processes can connect to the same instance concurrently and share the
 keyspace, including pub/sub and transactions.
 
-### Discovering the port (one instance per worktree)
+### `meebis run` — one command, one instance
 
-meebis is meant to be run one-per-worktree and thrown away. Instead of
-hand-assigning a port to each worktree, let the OS pick a free one with
-`--port 0` and record it with `--port-file`, so your app and tests can find it:
+Most of the time you don't want to manage a server at all; you want a command to
+*have* a Redis. `meebis run` starts one, runs the command against it, and shuts
+it down when the command exits:
+
+```sh
+meebis run -- npm test
+```
+
+The command is handed its connection details in the environment:
+
+| Variable | Example |
+|----------|---------|
+| `REDIS_URL` | `redis://127.0.0.1:54312` |
+| `REDIS_HOST` | `127.0.0.1` |
+| `REDIS_PORT` | `54312` |
+
+Without an explicit `--port` the OS picks a free one, and the port is resolved
+*before* the command starts — so there is no startup race to lose, no port file
+to poll, and no collision when several run at once:
+
+```sh
+meebis run -- pytest
+meebis run -- ./bin/rails test
+meebis run --requirepass hunter2 -- ./my-app
+```
+
+That makes it safe to run one per worktree, or several in the same CI job, with
+nothing left behind either way. Server options go before the `--`; everything
+after it belongs to the command.
+
+`meebis run` exits with the command's own exit status, so it drops into a test
+script or a CI step without changing what "failed" means. For an app that reads
+something other than `REDIS_URL`, name the variable you want:
+
+```sh
+meebis run --env CACHE_URL --env SIDEKIQ_REDIS_URL -- ./bin/dev
+```
+
+Ctrl-C does what you would expect: the command is signalled, gets its own chance
+to shut down, and meebis follows it out — writing the snapshot on the way, if
+you passed `--dumpfile`. A second Ctrl-C stops asking nicely. meebis' own output
+goes to stderr in this mode, so the command keeps stdout to itself and
+`meebis run -- ... > out.txt` captures only the command's output.
+
+### A long-lived instance per worktree
+
+When you want a server that outlives any single command — one per worktree that
+several processes share — run it directly. Instead of hand-assigning a port to
+each worktree, let the OS pick a free one with `--port 0` and record it with
+`--port-file`, so your app and tests can find it:
 
 ```sh
 meebis --port 0 --port-file .meebis-port
