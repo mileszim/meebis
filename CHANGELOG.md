@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/mileszim/meebis/compare/v0.8.0...v0.9.0) (2026-08-17)
+
+
+### Features
+
+* add `meebis run -- <command>` to lend one command an instance ([#19](https://github.com/mileszim/meebis/issues/19)) ([5ffec30](https://github.com/mileszim/meebis/commit/5ffec3040baf039c3957f05cb3c2b4699f97d1b9))
+
 ## [0.8.0](https://github.com/mileszim/meebis/compare/v0.7.0...v0.8.0) (2026-08-14)
 
 
