@@ -99,3 +99,38 @@ jobs:
       # assert in. This checks those refusals name their reason.
       - name: Base image matrix
         run: bash devcontainer/test-bases.sh
+
+  # The flake is a second, independent way to build meebis, so nothing in the
+  # cargo job would notice it breaking — a dependency bump that needs a new
+  # native input, or a Cargo.lock change the vendoring cannot follow, shows up
+  # only here.
+  nix:
+    name: Nix flake
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Check the flake
+        run: nix flake check --print-build-logs
+
+      - name: Build the package
+        run: nix build --print-build-logs
+
+      - name: Run what was built
+        run: |
+          ./result/bin/meebis --version
+          nix run . -- --version
+
+      - name: Enter the dev shell
+        run: nix develop --command cargo --version
+
+      # Printed rather than committed: the repo carries no flake.lock, so
+      # consumers track nixpkgs-unstable. This is the resolution CI used.
+      - name: Show the resolved inputs
+        run: cat flake.lock
