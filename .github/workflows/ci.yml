@@ -60,3 +60,10 @@ jobs:
 
       - name: Redis compatibility suite
         run: bash tests/compat/run.sh ./target/release/meebis
+
+      # The Claude Code plugin's hooks are shell, so nothing else in the build
+      # would notice them breaking. This drives them the way Claude Code does —
+      # the script from hooks.json, the event JSON on stdin — against the
+      # binary just built.
+      - name: Claude Code plugin hooks
+        run: bash claude-code/test-hooks.sh ./target/release/meebis

@@ -1,0 +1,19 @@
+{
+  "name": "meebis",
+  "description": "Disposable, in-memory Redis for Claude Code sessions",
+  "owner": {
+    "name": "Miles Zimmerman",
+    "url": "https://github.com/mileszim"
+  },
+  "plugins": [
+    {
+      "name": "meebis",
+      "description": "Gives a project its own disposable Redis for the length of a Claude Code session, and teaches Claude how to use it — what to start, where the port is, and which Redis features meebis does not implement.",
+      "source": "./claude-code",
+      "version": "0.1.0",
+      "category": "development",
+      "tags": ["redis", "testing", "worktree", "dev-server"],
+      "homepage": "https://github.com/mileszim/meebis"
+    }
+  ]
+}
