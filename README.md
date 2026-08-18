@@ -101,7 +101,8 @@ r.set("hello", "world")
 | `--databases <N>` | `16` | Number of `SELECT`able databases |
 | `--dumpfile <PATH>` | *(none)* | Load this RDB snapshot at boot, write it on exit (see [Snapshots](#snapshots-dumpfile)) |
 | `--dir <DIR>` / `--dbfilename <NAME>` | `.` / `dump.rdb` | Redis' two-part spelling of `--dumpfile` |
-| `--dumpfile-strict` | *(off)* | Refuse to start when a dump exists but cannot be loaded |
+| `--seed <PATH>` | *(none)* | Load this RDB snapshot at boot and never write to it (see [Seeding from a fixture](#seeding-from-a-fixture-seed)) |
+| `--dumpfile-strict` | *(off)* | Refuse to start when the snapshot asked for cannot be loaded |
 | `--verbose` | *(off)* | Log every command and reply (see [Verbose logging](#verbose-logging)) |
 | `--loglevel <LEVEL>` | `notice` | `nothing`/`warning`/`notice`/`verbose`/`debug`; `verbose` and `debug` are the same as `--verbose` |
 | `--env <NAME>` | *(none)* | `meebis run` only: also set `<NAME>` to the connection URL (repeatable) |
@@ -465,6 +466,40 @@ A few things worth knowing:
   `--databases` — round-trips.
 - **`DEBUG RELOAD`** runs the whole keyspace through the same codec in memory,
   which is how the test suite checks the two halves agree.
+
+### Seeding from a fixture (`--seed`)
+
+`--dumpfile` reads *and* writes the same path, which is wrong for the obvious
+worktree pattern — "every instance starts from `fixtures/golden.rdb`" — because
+every instance would then overwrite the fixture on the way out, and the third
+worktree would inherit whatever the second one happened to leave behind.
+
+`--seed` is the read-only half:
+
+```sh
+meebis --seed fixtures/golden.rdb
+```
+
+```
+meebis 0.9.0 ready on 127.0.0.1:6379 (pid 12345) — in-memory, seeded from fixtures/golden.rdb (read-only)
+```
+
+The snapshot is loaded at boot and the file is never written to again — not on
+exit, not on `SHUTDOWN`, not on `SAVE`/`BGSAVE` (which still reply `OK`, exactly
+as they do for an instance with no dump file at all). Run twenty of them against
+one fixture and it is still byte-for-byte the file you committed.
+
+It also declines the one other thing `--dumpfile` does to its file: a dump that
+won't load is renamed to `<name>.unreadable-<pid>` so the next save can't destroy
+it, but a seed that won't load is *left alone* — it isn't meebis' file to move,
+and twenty instances must not race to shuffle it around. meebis warns and starts
+empty instead.
+
+`--seed` and `--dumpfile` (and its `--dir`/`--dbfilename` spelling) are mutually
+exclusive; they say opposite things about the same path. `--dumpfile-strict`
+applies to either, and for a seed it also makes a *missing* file fatal — an
+absent dump file is an ordinary first boot, while an absent fixture is a path
+that doesn't say what its author thought it said.
 
 ## Deliberately not supported
 

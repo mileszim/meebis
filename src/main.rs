@@ -60,8 +60,11 @@ struct Config {
     /// RDB snapshot to load at boot and write at exit. `None` keeps meebis
     /// purely ephemeral, which is still the default.
     dumpfile: Option<std::path::PathBuf>,
-    /// Refuse to start when the dump exists but cannot be loaded, instead of
-    /// setting it aside and starting empty.
+    /// RDB snapshot to load at boot and never write back (`--seed`). Mutually
+    /// exclusive with `dumpfile`.
+    seed: Option<std::path::PathBuf>,
+    /// Refuse to start when the snapshot that was asked for cannot be loaded,
+    /// instead of setting it aside and starting empty.
     dumpfile_strict: bool,
     /// `meebis run -- <command>`: the command to run against this instance,
     /// which then lives exactly as long as the command does.
@@ -123,8 +126,12 @@ OPTIONS:
                                on exit, on SHUTDOWN, and on SAVE/BGSAVE
         --dir <DIR>            Redis' spelling of the same thing: the snapshot
         --dbfilename <NAME>    is <DIR>/<NAME> (default dir '.', name dump.rdb)
-        --dumpfile-strict      Exit rather than start empty when a dump exists
-                               but cannot be loaded
+        --seed <PATH>          Load this RDB snapshot at boot and never write to
+                               it. For a fixture several instances share, where
+                               --dumpfile would have each of them overwrite the
+                               original on the way out
+        --dumpfile-strict      Exit rather than start empty when the snapshot
+                               asked for cannot be loaded
         --verbose              Log every command and reply to stdout
         --loglevel <LEVEL>     nothing|warning|notice|verbose|debug
                                (default: notice; verbose and debug log every
@@ -133,6 +140,9 @@ OPTIONS:
     -v, --version              Print version
 
 Without a dump file, everything is kept in memory and discarded on exit.
+
+    meebis --seed fixtures/golden.rdb    # every boot starts from the fixture,
+                                         # and the fixture is never written to
 
 A dump file does not make meebis durable — the keyspace still lives only in
 RAM, and only a clean exit writes it out. What it buys is handing state across:
@@ -161,6 +171,7 @@ fn parse_args() -> Result<Config, i32> {
         databases: db::DEFAULT_DATABASES,
         verbose: false,
         dumpfile: None,
+        seed: None,
         dumpfile_strict: false,
         run: None,
     };
@@ -262,6 +273,13 @@ fn parse_args() -> Result<Config, i32> {
                 Some(p) => cfg.dumpfile = Some(p.into()),
                 None => {
                     eprintln!("meebis: --dumpfile requires a path");
+                    return Err(1);
+                }
+            },
+            "--seed" => match args.next() {
+                Some(p) => cfg.seed = Some(p.into()),
+                None => {
+                    eprintln!("meebis: --seed requires a path");
                     return Err(1);
                 }
             },
@@ -376,21 +394,64 @@ fn parse_args() -> Result<Config, i32> {
         return Err(1);
     }
 
+    // The two say opposite things about the same file, so combining them would
+    // only be a way to ask which one wins.
+    if cfg.seed.is_some() && cfg.dumpfile.is_some() {
+        eprintln!(
+            "meebis: --seed cannot be combined with --dumpfile/--dir/--dbfilename\n\
+             meebis: --seed loads a snapshot and never writes to it; --dumpfile does both"
+        );
+        return Err(1);
+    }
+
     Ok(cfg)
 }
 
-/// Seed the keyspace from the dump before the listener opens, so no client can
-/// observe the empty pre-load state.
+/// Which flag named the snapshot, which is what decides how much liberty meebis
+/// may take with the file.
+#[derive(Clone, Copy, PartialEq)]
+enum Source {
+    /// `--dumpfile`: meebis' own file, which it will write back.
+    Dump,
+    /// `--seed`: an input the user named, quite possibly shared with other
+    /// instances, and never written to.
+    Seed,
+}
+
+/// Seed the keyspace from the snapshot before the listener opens, so no client
+/// can observe the empty pre-load state.
 ///
-/// A missing file is the normal first boot. A file that exists but will not
-/// load is the interesting case: by default meebis moves it aside and starts
-/// empty, because a dev server that refuses to boot is worse than one that
-/// starts fresh — but it must not later overwrite the evidence, hence the
-/// rename rather than a warning alone. `--dumpfile-strict` opts into Redis'
-/// behavior of refusing to start.
-fn load_dump(shared: &Shared, path: &std::path::Path, strict: bool) -> Result<(), i32> {
+/// A file that exists but will not load is the interesting case. For a
+/// `--dumpfile` meebis moves it aside and starts empty, because a dev server
+/// that refuses to boot is worse than one that starts fresh — but it must not
+/// later overwrite the evidence, hence the rename rather than a warning alone.
+///
+/// A `--seed` gets no such treatment: it is not meebis' file to rename, and
+/// twenty instances loading the same fixture must not race to shuffle it
+/// around. Nothing is written to it under any outcome.
+///
+/// `--dumpfile-strict` opts into Redis' behavior of refusing to start. A
+/// *missing* file is only fatal for a seed: an absent dump file is the ordinary
+/// first boot, while an absent fixture is a path that does not say what its
+/// author thought it said.
+fn load_dump(
+    shared: &Shared,
+    path: &std::path::Path,
+    source: Source,
+    strict: bool,
+) -> Result<(), i32> {
     let mut ks = shared.db.lock().unwrap();
     match rdb::load(path, &mut ks) {
+        Ok(None) if source == Source::Seed => {
+            if strict {
+                eprintln!("meebis: no seed at {} — refusing to start", path.display());
+                return Err(1);
+            }
+            eprintln!(
+                "meebis: warning: no seed at {} — starting empty",
+                path.display()
+            );
+        }
         Ok(None) => {
             crate::out!("meebis: no dump at {} yet — starting empty", path.display());
         }
@@ -415,11 +476,15 @@ fn load_dump(shared: &Shared, path: &std::path::Path, strict: bool) -> Result<()
             }
         }
         Err(e) => {
+            eprintln!("meebis: could not load {}: {e}", path.display());
             if strict {
-                eprintln!("meebis: could not load {}: {e}", path.display());
                 return Err(1);
             }
-            eprintln!("meebis: could not load {}: {e}", path.display());
+            // A seed is read-only in every direction, including this one.
+            if source == Source::Seed {
+                eprintln!("meebis: starting with an empty keyspace; the seed is left as it is");
+                return Ok(());
+            }
             match set_aside(path) {
                 Ok(kept) => eprintln!(
                     "meebis: starting with an empty keyspace; the unreadable file is kept at {}",
@@ -534,8 +599,14 @@ async fn serve(cfg: Config) -> std::io::Result<()> {
         start,
     ));
 
-    if let Some(path) = &cfg.dumpfile {
-        if let Err(code) = load_dump(&shared, path, cfg.dumpfile_strict) {
+    // Exactly one of the two can be set; `parse_args` rejects both.
+    let snapshot = match (&cfg.dumpfile, &cfg.seed) {
+        (Some(path), _) => Some((path, Source::Dump)),
+        (_, Some(path)) => Some((path, Source::Seed)),
+        _ => None,
+    };
+    if let Some((path, source)) = snapshot {
+        if let Err(code) = load_dump(&shared, path, source, cfg.dumpfile_strict) {
             std::process::exit(code);
         }
     }
@@ -545,8 +616,10 @@ async fn serve(cfg: Config) -> std::io::Result<()> {
         VERSION,
         listening_on(&local_addr, &cfg.unixsocket),
         std::process::id(),
-        match &cfg.dumpfile {
-            Some(p) => format!("in-memory, snapshotting to {}", p.display()),
+        match snapshot {
+            Some((p, Source::Dump)) => format!("in-memory, snapshotting to {}", p.display()),
+            Some((p, Source::Seed)) =>
+                format!("in-memory, seeded from {} (read-only)", p.display()),
             None => "in-memory, no persistence".to_string(),
         }
     );
