@@ -300,6 +300,36 @@ docker run --rm -p 6379:6379 -v "$PWD/.meebis:/data" \
 kill` does not. See [Snapshots](#snapshots-dumpfile) for what that file is and
 is not.
 
+## Claude Code plugin
+
+Coding agents working in parallel worktrees hit the same problem this whole tool
+is about: each one needs its own Redis, and none of them should be sharing a
+keyspace. There is a plugin in [`claude-code/`](claude-code/) for that:
+
+```
+/plugin marketplace add mileszim/meebis
+/plugin install meebis@meebis
+```
+
+It ships a **skill** that tells Claude to reach for `meebis run -- <command>`,
+where to find a running instance's port, and — the part that saves the most
+time — which Redis features meebis does not implement, so a missing `XREADGROUP`
+isn't mistaken for a bug in the code under test.
+
+It also ships **session hooks** that give a project its own instance for as long
+as a session lasts. Those are opt-in per project, so installing the plugin does
+not start servers everywhere:
+
+```sh
+mkdir .meebis            # this project wants an instance
+echo .meebis/ >> .gitignore
+```
+
+Every Claude Code session in that project then gets a server on an OS-assigned
+port, recorded in `.meebis/port`; sessions in the same project share one, and it
+is stopped when the last of them ends. See the
+[plugin README](claude-code/README.md) for the details.
+
 ## Supported commands
 
 Verified byte-for-byte against Redis 7.2 for the cases in the test suite.

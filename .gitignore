@@ -1,2 +1,4 @@
 /target
 dump.rdb
+# Runtime state for the Claude Code plugin (port, pid, log, session markers).
+/.meebis/

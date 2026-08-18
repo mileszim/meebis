@@ -1,0 +1,13 @@
+{
+  "name": "meebis",
+  "description": "Gives a project its own disposable Redis for the length of a Claude Code session, and teaches Claude how to use it — what to start, where the port is, and which Redis features meebis does not implement.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Miles Zimmerman",
+    "url": "https://github.com/mileszim"
+  },
+  "homepage": "https://github.com/mileszim/meebis",
+  "repository": "https://github.com/mileszim/meebis",
+  "license": "MIT",
+  "keywords": ["redis", "testing", "worktree", "dev-server"]
+}
