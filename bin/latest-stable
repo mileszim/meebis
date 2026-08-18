@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# asdf: the newest release, for `asdf install meebis latest`.
+set -euo pipefail
+
+. "$(dirname "$0")/lib.sh"
+
+"$(dirname "$0")/list-all" | tr ' ' '\n' | grep -v '^$' | tail -n 1

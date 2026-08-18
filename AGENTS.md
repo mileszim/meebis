@@ -40,8 +40,14 @@ src/
     packed.rs         listpack/ziplist/intset decoders, listpack writer
     read.rs write.rs  value codecs (read accepts all; write stays flat)
     stream.rs         the one type with no plain encoding
+bin/                  the asdf plugin (asdf clones this repo and looks here)
 tests/compat/         Redis-spec differential + RESP3 parity + RDB interchange
 ```
+
+`bin/` is not project tooling — it is the asdf plugin contract (`list-all`,
+`download`, `install`, `latest-stable`), which is why it sits at the repository
+root: `asdf plugin add meebis <this repo>` expects to find it there. Exercise it
+with `bash tests/asdf-plugin.sh`.
 
 ### The RDB codec is asymmetric on purpose
 

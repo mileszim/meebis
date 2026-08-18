@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# asdf: shown by `asdf help meebis`.
+cat <<'EOF'
+meebis is a fast, disposable, in-memory Redis-compatible server for ephemeral
+dev work. Spin one up per git worktree, point a couple of processes at it, and
+throw it away — or skip the lifecycle entirely with `meebis run -- <command>`.
+
+This plugin installs the prebuilt release binary for your platform (macOS and
+Linux, arm64 and x86_64) and verifies its published checksum.
+
+https://github.com/mileszim/meebis
+EOF
