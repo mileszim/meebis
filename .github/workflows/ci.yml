@@ -67,3 +67,24 @@ jobs:
       # binary just built.
       - name: Claude Code plugin hooks
         run: bash claude-code/test-hooks.sh ./target/release/meebis
+
+  # The devcontainer feature installs published release assets into other
+  # people's images, so nothing in the cargo build would notice it breaking.
+  devcontainer:
+    name: Devcontainer feature
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Feature tests
+        run: >
+          npx --yes @devcontainers/cli@latest features test
+          --project-folder devcontainer
+          --features meebis
+          --base-image mcr.microsoft.com/devcontainers/base:debian
+
+      # The harness above cannot cover unsupported bases: a feature that fails
+      # to install fails the image build, so there is no container left to
+      # assert in. This checks those refusals name their reason.
+      - name: Base image matrix
+        run: bash devcontainer/test-bases.sh

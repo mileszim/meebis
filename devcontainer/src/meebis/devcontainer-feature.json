@@ -1,0 +1,18 @@
+{
+  "id": "meebis",
+  "version": "1.0.0",
+  "name": "meebis",
+  "description": "A fast, disposable, in-memory Redis-compatible server for ephemeral dev work. Installs the meebis binary; no daemon, no data directory, nothing to clean up. Needs a glibc 2.34+ base (Debian 12+, Ubuntu 22.04+); Alpine is not supported.",
+  "documentationURL": "https://github.com/mileszim/meebis#devcontainer",
+  "licenseURL": "https://github.com/mileszim/meebis/blob/main/LICENSE",
+  "keywords": ["redis", "database", "testing"],
+  "options": {
+    "version": {
+      "type": "string",
+      "proposals": ["latest", "0.12.0"],
+      "default": "latest",
+      "description": "meebis version to install: 'latest', or an exact version such as 0.12.0."
+    }
+  },
+  "installsAfter": ["ghcr.io/devcontainers/features/common-utils"]
+}
