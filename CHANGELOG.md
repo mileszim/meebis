@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/mileszim/meebis/compare/v0.9.0...v0.10.0) (2026-08-18)
+
+
+### Features
+
+* listen on a unix socket with --unixsocket ([#21](https://github.com/mileszim/meebis/issues/21)) ([e82e2a4](https://github.com/mileszim/meebis/commit/e82e2a48ddf5737f7ce03ab37460dfc982b7478f))
+
 ## [0.9.0](https://github.com/mileszim/meebis/compare/v0.8.0...v0.9.0) (2026-08-17)
 
 
