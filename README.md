@@ -94,6 +94,7 @@ r.set("hello", "world")
 |------|---------|-------------|
 | `-p`, `--port <PORT>` | `6379` | Port to listen on (`0` lets the OS pick a free one) |
 | `--bind <ADDR>` | `127.0.0.1` | Address to bind |
+| `--unixsocket <PATH>` | *(none)* | Listen on a unix socket; on its own it replaces the port (see [Unix sockets](#unix-sockets)) |
 | `--port-file <PATH>` | *(none)* | Write the actual listen port to `<PATH>` on boot |
 | `--requirepass <PASS>` | *(none)* | Require `AUTH` before most commands |
 | `--maxclients <N>` | `10000` | Maximum simultaneous connections |
@@ -149,6 +150,9 @@ something other than `REDIS_URL`, name the variable you want:
 meebis run --env CACHE_URL --env SIDEKIQ_REDIS_URL -- ./bin/dev
 ```
 
+To skip ports altogether, `--unixsocket` swaps the address for a path — see
+[Unix sockets](#unix-sockets).
+
 Ctrl-C does what you would expect: the command is signalled, gets its own chance
 to shut down, and meebis follows it out — writing the snapshot on the way, if
 you passed `--dumpfile`. A second Ctrl-C stops asking nicely. meebis' own output
@@ -170,6 +174,58 @@ export REDIS_URL="redis://127.0.0.1:$(cat .meebis-port)"
 The port is written to the file atomically once meebis has bound, and rewritten
 on each boot — so a reader never sees a half-written value. A `.envrc` (direnv)
 or a `Procfile` is a natural place to wire this into your dev loop.
+
+### Unix sockets
+
+A port has to be allocated, recorded, and looked up. A socket path doesn't —
+it's derivable from the worktree itself, which makes it the simpler address for
+exactly the case meebis is built for:
+
+```sh
+meebis --unixsocket .meebis/redis.sock
+```
+
+```
+meebis 0.9.0 ready on .meebis/redis.sock (pid 12345) — in-memory, no persistence
+```
+
+**`--unixsocket` on its own replaces the TCP port entirely.** That is the point:
+leaving `6379` bound as well would reintroduce the collision the socket was
+chosen to avoid, so twenty worktrees can each run that exact command with
+nothing to coordinate. Pass `--port` as well to listen on both:
+
+```sh
+meebis --unixsocket .meebis/redis.sock --port 6400
+```
+
+Clients dial it the way they dial Redis:
+
+```sh
+redis-cli -s .meebis/redis.sock ping
+```
+
+```python
+r = redis.Redis(unix_socket_path=".meebis/redis.sock")
+r = redis.from_url("unix:///abs/path/to/redis.sock")   # or by URL
+```
+
+`meebis run` works the same way, and hands down what there is to hand down —
+`REDIS_URL` as `unix://<path>` and `REDIS_SOCKET` as the bare path. `REDIS_HOST`
+and `REDIS_PORT` are *unset* in this mode rather than left holding whatever they
+held before, so an app that needs a host:port fails where the mistake is instead
+of quietly connecting to a different Redis:
+
+```sh
+meebis run --unixsocket .meebis/redis.sock -- npm test
+```
+
+The socket file is removed on a clean exit. If meebis is killed outright it
+stays behind, so the next boot clears it — but only after checking that nobody
+is answering on it, which means a second server can never displace a running
+one. A path holding something that isn't a socket is refused, never deleted.
+
+Unix only, for the obvious reason; on Windows `--unixsocket` is rejected at
+startup.
 
 ### Verbose logging
 

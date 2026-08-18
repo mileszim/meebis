@@ -252,6 +252,7 @@ pub fn shutdown(shared: &Shared, ks: &mut crate::db::Keyspace, args: &[Bytes]) -
             return Frame::err(format!("Errors trying to SHUTDOWN. Check logs. ({e})"));
         }
     }
+    shared.cleanup_unixsocket();
     std::process::exit(0);
 }
 

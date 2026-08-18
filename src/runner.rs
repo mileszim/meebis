@@ -39,6 +39,14 @@ impl Spec {
     }
 }
 
+/// Where the child should connect. A server listening on a unix socket without
+/// a port has no host and no port to hand over, so the two cases carry
+/// genuinely different information rather than one pretending to be the other.
+pub enum Endpoint {
+    Tcp { host: String, port: u16 },
+    Unix { path: std::path::PathBuf },
+}
+
 /// The address a child should dial, given what the server bound to. A wildcard
 /// bind is reachable from anywhere, but the child is local, so point it at the
 /// loopback rather than at `0.0.0.0` — which is not a connectable address.
@@ -50,18 +58,30 @@ pub fn connect_host(bind: &str) -> &str {
     }
 }
 
-/// Build the `redis://` URL clients expect. IPv6 literals are bracketed, and
-/// the password is percent-encoded so a punctuation-heavy one cannot corrupt
-/// the URL's structure.
-fn url(host: &str, port: u16, password: Option<&str>) -> String {
-    let host = if host.contains(':') && !host.starts_with('[') {
-        format!("[{host}]")
-    } else {
-        host.to_string()
-    };
-    match password {
-        Some(pw) => format!("redis://:{}@{host}:{port}", encode(pw)),
-        None => format!("redis://{host}:{port}"),
+impl Endpoint {
+    /// Build the URL clients expect. IPv6 literals are bracketed, and the
+    /// password is percent-encoded so a punctuation-heavy one cannot corrupt
+    /// the URL's structure.
+    ///
+    /// The `unix://` spelling — with the socket path where a URL would normally
+    /// put the host — is the form redis-py, ioredis, go-redis and friends
+    /// accept for socket connections.
+    fn url(&self, password: Option<&str>) -> String {
+        let auth = match password {
+            Some(pw) => format!(":{}@", encode(pw)),
+            None => String::new(),
+        };
+        match self {
+            Endpoint::Tcp { host, port } => {
+                let host = if host.contains(':') && !host.starts_with('[') {
+                    format!("[{host}]")
+                } else {
+                    host.clone()
+                };
+                format!("redis://{auth}{host}:{port}")
+            }
+            Endpoint::Unix { path } => format!("unix://{auth}{}", path.display()),
+        }
     }
 }
 
@@ -83,13 +103,26 @@ fn encode(s: &str) -> String {
 /// Start the child with the connection details in its environment. stdin,
 /// stdout and stderr are inherited, so the command behaves exactly as it would
 /// without the wrapper.
-pub fn spawn(spec: &Spec, host: &str, port: u16, password: Option<&str>) -> std::io::Result<Child> {
-    let url = url(host, port, password);
+///
+/// On a unix socket there is no host or port to pass on, and `REDIS_SOCKET`
+/// takes their place. Any inherited `REDIS_HOST`/`REDIS_PORT` are *removed*
+/// rather than left alone: a stale pair pointing at some unrelated Redis is far
+/// worse than their absence, which at least fails where the mistake is.
+pub fn spawn(spec: &Spec, endpoint: &Endpoint, password: Option<&str>) -> std::io::Result<Child> {
+    let url = endpoint.url(password);
     let mut cmd = Command::new(&spec.command);
-    cmd.args(&spec.args)
-        .env("REDIS_URL", &url)
-        .env("REDIS_HOST", host)
-        .env("REDIS_PORT", port.to_string());
+    cmd.args(&spec.args).env("REDIS_URL", &url);
+    match endpoint {
+        Endpoint::Tcp { host, port } => {
+            cmd.env("REDIS_HOST", host)
+                .env("REDIS_PORT", port.to_string());
+        }
+        Endpoint::Unix { path } => {
+            cmd.env("REDIS_SOCKET", path)
+                .env_remove("REDIS_HOST")
+                .env_remove("REDIS_PORT");
+        }
+    }
     for name in &spec.extra_env {
         cmd.env(name, &url);
     }
@@ -196,28 +229,51 @@ fn code(status: std::io::Result<ExitStatus>) -> i32 {
 mod tests {
     use super::*;
 
+    fn tcp(host: &str, port: u16) -> Endpoint {
+        Endpoint::Tcp {
+            host: host.into(),
+            port,
+        }
+    }
+
+    fn unix(path: &str) -> Endpoint {
+        Endpoint::Unix { path: path.into() }
+    }
+
     #[test]
     fn url_without_password() {
-        assert_eq!(url("127.0.0.1", 6400, None), "redis://127.0.0.1:6400");
+        assert_eq!(tcp("127.0.0.1", 6400).url(None), "redis://127.0.0.1:6400");
     }
 
     #[test]
     fn url_brackets_ipv6() {
-        assert_eq!(url("::1", 6379, None), "redis://[::1]:6379");
+        assert_eq!(tcp("::1", 6379).url(None), "redis://[::1]:6379");
         // Already bracketed input is not double-wrapped.
-        assert_eq!(url("[::1]", 6379, None), "redis://[::1]:6379");
+        assert_eq!(tcp("[::1]", 6379).url(None), "redis://[::1]:6379");
     }
 
     #[test]
     fn url_encodes_the_password() {
         assert_eq!(
-            url("127.0.0.1", 6379, Some("p@ss:w/rd")),
+            tcp("127.0.0.1", 6379).url(Some("p@ss:w/rd")),
             "redis://:p%40ss%3Aw%2Frd@127.0.0.1:6379"
         );
         // Unreserved characters survive untouched.
         assert_eq!(
-            url("127.0.0.1", 6379, Some("aZ0-._~")),
+            tcp("127.0.0.1", 6379).url(Some("aZ0-._~")),
             "redis://:aZ0-._~@127.0.0.1:6379"
+        );
+    }
+
+    #[test]
+    fn url_for_a_socket_is_the_path() {
+        assert_eq!(
+            unix("/tmp/w/redis.sock").url(None),
+            "unix:///tmp/w/redis.sock"
+        );
+        assert_eq!(
+            unix("/tmp/w/redis.sock").url(Some("hunter2")),
+            "unix://:hunter2@/tmp/w/redis.sock"
         );
     }
 

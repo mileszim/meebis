@@ -25,6 +25,8 @@ mod resp;
 mod runner;
 mod server;
 mod sha1;
+#[cfg(unix)]
+mod unixsocket;
 
 use bytes::BytesMut;
 use server::{ClientInfo, ConnState, Shared};
@@ -33,8 +35,8 @@ use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -43,6 +45,11 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 struct Config {
     bind: String,
     port: u16,
+    /// Whether to bind a TCP listener at all. Always true unless a unix socket
+    /// was asked for without an explicit port — see [`parse_args`].
+    tcp: bool,
+    /// Unix-domain socket to listen on, alongside or instead of TCP.
+    unixsocket: Option<std::path::PathBuf>,
     port_file: Option<String>,
     requirepass: Option<String>,
     maxclients: usize,
@@ -86,6 +93,12 @@ RUN:
         meebis run --requirepass hunter2 -- ./bin/rails test
         meebis run --env CACHE_URL -- pytest
 
+    With --unixsocket there is no port at all, so REDIS_URL becomes
+    unix://<path>, REDIS_SOCKET holds the same path, and REDIS_HOST/REDIS_PORT
+    are unset rather than left pointing somewhere stale:
+
+        meebis run --unixsocket .meebis/redis.sock -- npm test
+
     Options for the server go before the `--`; everything after it belongs to
     the command. meebis' own output goes to stderr in this mode, so the
     command keeps stdout to itself.
@@ -96,6 +109,11 @@ OPTIONS:
                                other than REDIS_URL
     -p, --port <PORT>          Port to listen on (default: 6379)
         --bind <ADDR>          Address to bind (default: 127.0.0.1)
+        --unixsocket <PATH>    Listen on a unix-domain socket at <PATH>. On its
+                               own this replaces the TCP port entirely, so the
+                               path is the whole address and nothing has to be
+                               allocated or discovered; add an explicit --port
+                               to listen on both
         --port-file <PATH>     Write the actual listen port to <PATH> on boot
                                (useful with --port 0, so tooling can find it)
         --requirepass <PASS>   Require AUTH with this password
@@ -135,6 +153,8 @@ fn parse_args() -> Result<Config, i32> {
     let mut cfg = Config {
         bind: "127.0.0.1".to_string(),
         port: 6379,
+        tcp: true,
+        unixsocket: None,
         port_file: None,
         requirepass: None,
         maxclients: 10000,
@@ -186,6 +206,24 @@ fn parse_args() -> Result<Config, i32> {
                 Some(b) => cfg.bind = b,
                 None => {
                     eprintln!("meebis: --bind requires an address");
+                    return Err(1);
+                }
+            },
+            "--unixsocket" => match args.next() {
+                Some(p) => {
+                    #[cfg(unix)]
+                    {
+                        cfg.unixsocket = Some(p.into());
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        let _ = p;
+                        eprintln!("meebis: --unixsocket is not supported on this platform");
+                        return Err(1);
+                    }
+                }
+                None => {
+                    eprintln!("meebis: --unixsocket requires a path");
                     return Err(1);
                 }
             },
@@ -313,6 +351,19 @@ fn parse_args() -> Result<Config, i32> {
         }
     }
 
+    // A socket path is a complete address on its own. Binding a port next to it
+    // anyway would reintroduce exactly the collision the socket was chosen to
+    // avoid — so `--unixsocket` alone means the socket is the whole address,
+    // and asking for a port explicitly is how you say you want both.
+    cfg.tcp = cfg.unixsocket.is_none() || port_explicit;
+    if !cfg.tcp && cfg.port_file.is_some() {
+        eprintln!(
+            "meebis: --port-file has nothing to write without a TCP port \
+             (pass --port too, or drop --port-file)"
+        );
+        return Err(1);
+    }
+
     // An explicit --dumpfile wins; otherwise either half of Redis' spelling is
     // enough to turn persistence on, defaulting the other half the way Redis
     // does. Passing neither leaves meebis purely ephemeral.
@@ -435,18 +486,36 @@ fn main() {
 async fn serve(cfg: Config) -> std::io::Result<()> {
     let start = Instant::now();
 
-    let bind_addr = format!("{}:{}", cfg.bind, cfg.port);
-    let listener = TcpListener::bind(&bind_addr)
-        .await
-        .map_err(|e| std::io::Error::new(e.kind(), format!("could not bind {bind_addr}: {e}")))?;
+    // Both listeners are opened before anything else happens, so a bind failure
+    // is reported before the keyspace is loaded and no half-started server ever
+    // becomes visible.
+    let tcp = match cfg.tcp {
+        true => {
+            let bind_addr = format!("{}:{}", cfg.bind, cfg.port);
+            Some(TcpListener::bind(&bind_addr).await.map_err(|e| {
+                std::io::Error::new(e.kind(), format!("could not bind {bind_addr}: {e}"))
+            })?)
+        }
+        false => None,
+    };
     // Resolve the actual port (matters when --port 0 asks the OS to pick one).
-    let local_addr = listener.local_addr()?;
+    // With TCP off there is no port, which is also what Redis reports.
+    let local_addr = tcp.as_ref().map(|l| l.local_addr()).transpose()?;
+    let port = local_addr.map(|a| a.port()).unwrap_or(0);
+
+    #[cfg(unix)]
+    let unix = match &cfg.unixsocket {
+        Some(path) => Some(unixsocket::bind(path).map_err(|e| {
+            std::io::Error::new(e.kind(), format!("could not bind {}: {e}", path.display()))
+        })?),
+        None => None,
+    };
 
     // Publish the bound port for tooling to discover. A failure here is not
     // fatal — the server still works — but warn so a broken integration is
     // visible rather than silently hanging on a missing file.
     if let Some(path) = &cfg.port_file {
-        if let Err(e) = write_port_file(path, local_addr.port()) {
+        if let Err(e) = write_port_file(path, port) {
             eprintln!("meebis: could not write --port-file {path}: {e}");
         }
     }
@@ -456,7 +525,8 @@ async fn serve(cfg: Config) -> std::io::Result<()> {
 
     let shared = Arc::new(Shared::new(
         cfg.requirepass,
-        local_addr.port(),
+        port,
+        cfg.unixsocket.clone(),
         cfg.maxclients,
         cfg.databases,
         cfg.verbose,
@@ -473,7 +543,7 @@ async fn serve(cfg: Config) -> std::io::Result<()> {
     crate::out!(
         "meebis {} ready on {} (pid {}) — {}",
         VERSION,
-        local_addr,
+        listening_on(&local_addr, &cfg.unixsocket),
         std::process::id(),
         match &cfg.dumpfile {
             Some(p) => format!("in-memory, snapshotting to {}", p.display()),
@@ -498,21 +568,43 @@ async fn serve(cfg: Config) -> std::io::Result<()> {
         }
     });
 
+    // Each listener runs as its own task, so a server can answer on a port and
+    // a socket at the same time without either starving the other.
+    if let Some(listener) = tcp {
+        tokio::spawn(accept_tcp(listener, shared.clone()));
+    }
+    #[cfg(unix)]
+    if let Some(listener) = unix {
+        tokio::spawn(accept_unix(listener, shared.clone()));
+    }
+
     let Some(spec) = cfg.run else {
         // Snapshot and exit on Ctrl-C and on SIGTERM (how a container or a
         // supervisor stops us). Without a dump file there is nothing to flush
         // and this is the same immediate exit as before.
         spawn_signal_handler(shared.clone());
-        accept_loop(listener, shared).await;
-        return Ok(());
+        // The listeners are running on their own tasks now; this one just has
+        // to stay out of the way until a signal or `SHUTDOWN` ends the process.
+        std::future::pending::<()>().await;
+        unreachable!("meebis exits via a signal or SHUTDOWN, not by returning");
     };
 
     // `run` mode: this instance exists for exactly one command. Signals go to
     // the supervisor instead of `spawn_signal_handler`, because the child needs
     // its own chance to shut down — exiting out from under it would strand it.
     crate::out!("meebis: running: {}", spec.display());
-    let host = runner::connect_host(&cfg.bind).to_string();
-    let child = match runner::spawn(&spec, &host, local_addr.port(), password.as_deref()) {
+    let endpoint = match &cfg.unixsocket {
+        // Without a port there is nothing to dial but the socket. Its path is
+        // made absolute because the child may well run somewhere else.
+        Some(path) if !cfg.tcp => runner::Endpoint::Unix {
+            path: std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()),
+        },
+        _ => runner::Endpoint::Tcp {
+            host: runner::connect_host(&cfg.bind).to_string(),
+            port,
+        },
+    };
+    let child = match runner::spawn(&spec, &endpoint, password.as_deref()) {
         Ok(child) => child,
         Err(e) => {
             eprintln!("meebis: run: could not start `{}`: {e}", spec.command);
@@ -522,10 +614,7 @@ async fn serve(cfg: Config) -> std::io::Result<()> {
         }
     };
 
-    let status = tokio::select! {
-        _ = accept_loop(listener, shared.clone()) => unreachable!("the accept loop never returns"),
-        status = runner::supervise(child) => status,
-    };
+    let status = runner::supervise(child).await;
 
     // The command is finished, so the instance has done its job. Flush the
     // snapshot exactly as a clean shutdown would, then take on the command's
@@ -536,12 +625,24 @@ async fn serve(cfg: Config) -> std::io::Result<()> {
             Err(e) => eprintln!("meebis: could not save: {e}"),
         }
     }
+    shared.cleanup_unixsocket();
     std::process::exit(status);
 }
 
-/// Accept connections forever. Split out so `run` mode can race it against the
-/// command it is supervising.
-async fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
+/// The addresses the banner reports, in the order a reader would look for them.
+fn listening_on(tcp: &Option<SocketAddr>, unix: &Option<std::path::PathBuf>) -> String {
+    match (tcp, unix) {
+        (Some(addr), Some(path)) => format!("{addr} and {}", path.display()),
+        (Some(addr), None) => addr.to_string(),
+        (None, Some(path)) => path.display().to_string(),
+        // `--unixsocket` is the only way to turn TCP off, so one of the two is
+        // always present.
+        (None, None) => "nothing".to_string(),
+    }
+}
+
+/// Accept TCP connections forever.
+async fn accept_tcp(listener: TcpListener, shared: Arc<Shared>) {
     loop {
         let (stream, addr) = match listener.accept().await {
             Ok(pair) => pair,
@@ -550,8 +651,35 @@ async fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
                 continue;
             }
         };
+        let _ = stream.set_nodelay(true);
         shared.connections_received.fetch_add(1, Ordering::Relaxed);
         let shared = shared.clone();
+        tokio::spawn(async move {
+            let _ = handle_connection(shared, stream, addr.to_string()).await;
+        });
+    }
+}
+
+/// Accept unix-socket connections forever. A unix peer has no address of its
+/// own, so clients are reported by the socket path, exactly as Redis does.
+#[cfg(unix)]
+async fn accept_unix(listener: tokio::net::UnixListener, shared: Arc<Shared>) {
+    let addr = shared
+        .unixsocket
+        .as_deref()
+        .map(unixsocket::peer_addr)
+        .unwrap_or_default();
+    loop {
+        let (stream, _) = match listener.accept().await {
+            Ok(pair) => pair,
+            Err(e) => {
+                eprintln!("meebis: accept error: {e}");
+                continue;
+            }
+        };
+        shared.connections_received.fetch_add(1, Ordering::Relaxed);
+        let shared = shared.clone();
+        let addr = addr.clone();
         tokio::spawn(async move {
             let _ = handle_connection(shared, stream, addr).await;
         });
@@ -568,6 +696,7 @@ fn save_and_exit(shared: &Shared, signal: &str) -> ! {
             Err(e) => eprintln!("meebis: {signal}: could not save: {e}"),
         }
     }
+    shared.cleanup_unixsocket();
     std::process::exit(0);
 }
 
@@ -599,12 +728,18 @@ fn spawn_signal_handler(shared: Arc<Shared>) {
     });
 }
 
-async fn handle_connection(
+/// Serve one client until it goes away. Generic over the transport so a TCP
+/// connection and a unix-socket connection run the exact same code — the only
+/// thing either half knows about the other is `addr`, the string `CLIENT LIST`
+/// reports.
+async fn handle_connection<S>(
     shared: Arc<Shared>,
-    mut stream: TcpStream,
-    addr: SocketAddr,
-) -> std::io::Result<()> {
-    let _ = stream.set_nodelay(true);
+    mut stream: S,
+    addr: String,
+) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let id = shared.next_client_id();
 
     // Enforce maxclients. The lock is released before any await below.
