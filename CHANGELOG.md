@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.0](https://github.com/mileszim/meebis/compare/v0.12.0...v0.13.0) (2026-08-18)
+
+
+### Features
+
+* publish a devcontainer feature ([#29](https://github.com/mileszim/meebis/issues/29)) ([a587b52](https://github.com/mileszim/meebis/commit/a587b52d6463a1fdb2cbe97e7236604ed4f45fe1))
+
 ## [0.12.0](https://github.com/mileszim/meebis/compare/v0.11.0...v0.12.0) (2026-08-18)
 
 
