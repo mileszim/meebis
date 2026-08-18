@@ -1,0 +1,24 @@
+{
+  "pinned_version": {
+    "image": "mcr.microsoft.com/devcontainers/base:debian",
+    "features": {
+      "meebis": {
+        "version": "0.11.0"
+      }
+    }
+  },
+  "ubuntu_latest": {
+    "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+    "features": {
+      "meebis": {
+        "version": "latest"
+      }
+    }
+  },
+  "slim_base_without_xz": {
+    "image": "debian:bookworm-slim",
+    "features": {
+      "meebis": {}
+    }
+  }
+}

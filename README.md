@@ -44,6 +44,12 @@ cargo binstall meebis           # prebuilt binary, no compile (needs cargo-binst
 cargo install meebis            # build from source (crates.io)
 ```
 
+**Devcontainer** — add it to `devcontainer.json`, see [Devcontainer](#devcontainer):
+
+```json
+"features": { "ghcr.io/mileszim/meebis/meebis:1": {} }
+```
+
 **Docker** (linux/amd64 & linux/arm64) — see [Docker](#docker) for Compose:
 
 ```sh
@@ -356,6 +362,50 @@ docker run --rm -p 6379:6379 -v "$PWD/.meebis:/data" \
 `docker stop` sends `SIGTERM`, which meebis catches and snapshots on; `docker
 kill` does not. See [Snapshots](#snapshots-dumpfile) for what that file is and
 is not.
+
+## Devcontainer
+
+There is a [devcontainer feature](https://containers.dev/features) that puts
+meebis in the image:
+
+```json
+{
+  "image": "mcr.microsoft.com/devcontainers/base:debian",
+  "features": {
+    "ghcr.io/mileszim/meebis/meebis:1": {}
+  }
+}
+```
+
+Pin the version if you want to:
+
+```json
+"features": {
+  "ghcr.io/mileszim/meebis/meebis:1": { "version": "0.12.0" }
+}
+```
+
+It installs the binary and **starts nothing** — meebis has no daemon, no data
+directory, and no config, so there is nothing to keep running between uses. Wrap
+whatever needs a Redis:
+
+```json
+"postCreateCommand": "meebis run -- npm test"
+```
+
+...or start one for the life of the container, if several processes need to
+share it:
+
+```json
+"postStartCommand": "nohup meebis --port 6379 > /tmp/meebis.log 2>&1 &"
+```
+
+**The base image needs glibc 2.34 or newer** — Debian 12+, Ubuntu 22.04+ — since
+that is what the release binaries are linked against. On an older base, or on
+Alpine, the feature stops during the build and says so rather than installing
+something that cannot run. For a musl or minimal environment, use the
+[Docker image](#docker) instead: it is statically linked and has no such
+requirement.
 
 ## Claude Code plugin
 

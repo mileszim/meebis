@@ -1,0 +1,45 @@
+name: Publish devcontainer feature
+
+# The feature has its own version, in devcontainer-feature.json, and is only
+# republished when the feature itself changes — it installs meebis `latest` by
+# default, so a meebis release needs no new publish. Bump that version when
+# changing anything under devcontainer/src; the registry rejects a re-push of a
+# version that already exists.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'devcontainer/src/**'
+      - '.github/workflows/devcontainer-feature.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    name: Publish to ghcr.io
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Publishing is irreversible per version, so prove the thing works before
+      # it goes anywhere.
+      - name: Test the feature
+        run: >
+          npx --yes @devcontainers/cli@latest features test
+          --project-folder devcontainer
+          --features meebis
+          --base-image mcr.microsoft.com/devcontainers/base:debian
+
+      - name: Publish
+        uses: devcontainers/action@v1
+        with:
+          publish-features: 'true'
+          base-path-to-features: './devcontainer/src'
+          # The docs are written by hand in README.md; letting the action
+          # generate and commit its own would fight with that.
+          generate-docs: 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
