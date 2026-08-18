@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.0](https://github.com/mileszim/meebis/compare/v0.14.0...v0.15.0) (2026-08-18)
+
+
+### Features
+
+* distribute meebis on npm ([#18](https://github.com/mileszim/meebis/issues/18)) ([cdb8fbe](https://github.com/mileszim/meebis/commit/cdb8fbe548dd4c3dc7ad60ec1dd3b2de85556beb))
+
 ## [0.14.0](https://github.com/mileszim/meebis/compare/v0.13.0...v0.14.0) (2026-08-18)
 
 
