@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.0](https://github.com/mileszim/meebis/compare/v0.13.0...v0.14.0) (2026-08-18)
+
+
+### Features
+
+* install via mise and asdf ([#28](https://github.com/mileszim/meebis/issues/28)) ([b22e448](https://github.com/mileszim/meebis/commit/b22e44888d447c493da217742ceff319dad26832))
+
 ## [0.13.0](https://github.com/mileszim/meebis/compare/v0.12.0...v0.13.0) (2026-08-18)
 
 
