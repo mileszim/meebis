@@ -72,6 +72,13 @@ docker run --rm -p 6379:6379 ghcr.io/mileszim/meebis
 [release](https://github.com/mileszim/meebis/releases/latest) as `.tar.xz`
 archives, with `sha256` checksums.
 
+**Nix** (flake) — no install needed to try it:
+
+```sh
+nix run github:mileszim/meebis -- --port 6400
+nix profile install github:mileszim/meebis
+```
+
 **From a local checkout**:
 
 ```sh
@@ -503,6 +510,47 @@ x86_64) and checks it against the `sha256` published beside it. `asdf install
 meebis latest` picks the newest release.
 
 Neither route builds from source, so neither needs a Rust toolchain.
+
+## Nix
+
+The flake exposes a package, an app, an overlay, and a dev shell:
+
+```sh
+nix run github:mileszim/meebis -- --port 6400   # no install at all
+nix profile install github:mileszim/meebis      # or keep it
+```
+
+In a project flake, the overlay is the usual way in:
+
+```nix
+{
+  inputs.meebis.url = "github:mileszim/meebis";
+
+  outputs = { nixpkgs, meebis, ... }:
+    let
+      pkgs = import nixpkgs {
+        system = "x86_64-linux";
+        overlays = [ meebis.overlays.default ];
+      };
+    in
+    {
+      devShells.x86_64-linux.default = pkgs.mkShell {
+        packages = [ pkgs.meebis ];
+      };
+    };
+}
+```
+
+Paired with direnv that gives a worktree its Redis as soon as you `cd` into it:
+put `use flake` in `.envrc`, then start one from a `Procfile` or run tests with
+`meebis run -- <command>`.
+
+`nix develop` in a checkout gets the full Rust toolchain plus `redis-server`,
+`redis-cli`, and a Python with `redis` installed — everything
+`tests/compat/run.sh` needs to diff meebis against real Redis.
+
+There is no committed `flake.lock`, so builds track `nixpkgs-unstable`. Run `nix
+flake lock` and commit the result if you would rather pin it.
 
 ## Devcontainer
 
