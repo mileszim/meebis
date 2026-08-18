@@ -68,6 +68,11 @@ jobs:
       - name: Claude Code plugin hooks
         run: bash claude-code/test-hooks.sh ./target/release/meebis
 
+      # Runs the direnv recipe extracted from README.md itself, so the
+      # documented snippet cannot rot into something that does not work.
+      - name: direnv recipe
+        run: bash tests/envrc-recipe.sh ./target/release/meebis
+
   # The devcontainer feature installs published release assets into other
   # people's images, so nothing in the cargo build would notice it breaking.
   devcontainer:

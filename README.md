@@ -179,8 +179,82 @@ export REDIS_URL="redis://127.0.0.1:$(cat .meebis-port)"
 ```
 
 The port is written to the file atomically once meebis has bound, and rewritten
-on each boot — so a reader never sees a half-written value. A `.envrc` (direnv)
-or a `Procfile` is a natural place to wire this into your dev loop.
+on each boot — so a reader never sees a half-written value.
+
+#### With direnv
+
+A `.envrc` is a natural place to wire this in: the worktree gets a Redis on the
+first `cd` into it, and every shell there sees the same one.
+
+<!-- envrc-recipe -->
+
+```sh
+# .envrc — one meebis for this worktree, started on the first `cd` in.
+#
+# direnv re-runs this whenever it reloads, so it must be idempotent: start a
+# server only when one is not already answering.
+meebis_dir="$PWD/.meebis"
+mkdir -p "$meebis_dir"
+
+# Asking the server whether it is there beats checking a pid: a pid can be
+# recycled onto something unrelated, and what matters is that a Redis answers.
+meebis_answering() {
+  [ -s "$meebis_dir/port" ] || return 1
+  (exec 3<>"/dev/tcp/127.0.0.1/$(cat "$meebis_dir/port")") 2>/dev/null
+}
+
+if ! meebis_answering; then
+  rm -f "$meebis_dir/port"
+  nohup meebis --port 0 --port-file "$meebis_dir/port" >"$meebis_dir/log" 2>&1 &
+  echo $! >"$meebis_dir/pid"
+  # meebis writes the port file only once it has bound, so waiting for it is
+  # waiting for "ready", not merely for "spawned".
+  for _ in $(seq 1 50); do
+    if meebis_answering; then break; fi
+    sleep 0.1
+  done
+fi
+
+if meebis_answering; then
+  export REDIS_HOST=127.0.0.1
+  export REDIS_PORT="$(cat "$meebis_dir/port")"
+  export REDIS_URL="redis://$REDIS_HOST:$REDIS_PORT"
+  # A restart picks a new port; this makes direnv notice instead of replaying a
+  # stale one from its cache.
+  if declare -F watch_file >/dev/null; then watch_file "$meebis_dir/port"; fi
+else
+  echo "meebis: did not come up — see $meebis_dir/log" >&2
+fi
+```
+
+Then `direnv allow`, and add `.meebis/` to `.gitignore`.
+
+Two things this deliberately does not pretend to do:
+
+- **It does not stop the server when you leave.** direnv has no reliable
+  teardown hook, so the instance outlives the shell — which is usually what you
+  want for a worktree, at about 2 MB. `kill $(cat .meebis/pid)` when you're done
+  with the worktree, or just delete the worktree and let it go.
+- **direnv caches the environment**, so if the server dies while you are away,
+  the variables it exported can outlive it. `direnv reload` starts a fresh one.
+
+If neither of those appeals, a test command doesn't need any of this —
+`meebis run -- <command>` starts and stops its own instance, which is why it is
+the better default for anything that isn't a long-lived shell.
+
+#### With a Procfile
+
+If the worktree already runs its processes under `foreman`, `overmind` or
+`hivemind`, meebis is just another line, and the supervisor handles the
+lifecycle:
+
+```procfile
+redis: meebis --port 6400
+web:   ./bin/dev
+```
+
+Pick a distinct port per worktree, or use `--unixsocket .meebis/redis.sock` and
+skip the question entirely.
 
 ### Unix sockets
 
