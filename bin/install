@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# asdf: place the downloaded binary in $ASDF_INSTALL_PATH/bin.
+#
+# The install path is only populated on success — asdf treats a directory that
+# exists as a version that is installed, so a half-written one would leave a
+# broken version that looks fine in `asdf list`.
+set -euo pipefail
+
+. "$(dirname "$0")/lib.sh"
+
+[ "${ASDF_INSTALL_TYPE:-version}" = "version" ] ||
+  fail "only released versions can be installed, not refs — build from source with cargo instead"
+
+version="${ASDF_INSTALL_VERSION:?ASDF_INSTALL_VERSION is not set}"
+src="${ASDF_DOWNLOAD_PATH:?ASDF_DOWNLOAD_PATH is not set}"
+dest="${ASDF_INSTALL_PATH:?ASDF_INSTALL_PATH is not set}"
+
+[ -f "$src/meebis" ] || fail "no downloaded binary at $src/meebis"
+
+staging="$(mktemp -d)"
+trap 'rm -rf "$staging"' EXIT
+
+mkdir -p "$staging/bin"
+cp "$src/meebis" "$staging/bin/meebis"
+chmod +x "$staging/bin/meebis"
+
+# Prove the binary runs on this machine before claiming the version is
+# installed — a wrong-architecture download otherwise fails much later, at a
+# point where nothing points back to here.
+installed="$("$staging/bin/meebis" --version 2>/dev/null)" ||
+  fail "the downloaded binary would not run on this machine"
+case "$installed" in
+  "meebis $version") ;;
+  *) fail "downloaded v${version} but the binary reports '${installed}'" ;;
+esac
+
+mkdir -p "$dest"
+cp -R "$staging/bin" "$dest/"
+echo "meebis: installed $installed to $dest/bin/meebis"

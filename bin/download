@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# asdf: fetch a release into $ASDF_DOWNLOAD_PATH, ready for bin/install.
+#
+# Splitting download from install is what lets asdf cache and retry the network
+# half on its own; this script does the fetching and the checksum, and leaves a
+# plain `meebis` binary behind for the other half to place.
+set -euo pipefail
+
+. "$(dirname "$0")/lib.sh"
+
+[ "${ASDF_INSTALL_TYPE:-version}" = "version" ] ||
+  fail "only released versions can be installed, not refs — build from source with cargo instead"
+
+version="${ASDF_INSTALL_VERSION:?ASDF_INSTALL_VERSION is not set}"
+dest="${ASDF_DOWNLOAD_PATH:?ASDF_DOWNLOAD_PATH is not set}"
+triple="$(target_triple)"
+archive="meebis-${triple}.tar.xz"
+url="$REPO/releases/download/v${version}/${archive}"
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+echo "meebis: downloading $url"
+fetch "$url" "$tmp/$archive" ||
+  fail "could not download v${version} for ${triple} — check that the version exists at $REPO/releases"
+
+# The release carries a checksum next to every archive, so there is no reason
+# to install an artifact without confirming it arrived intact.
+if fetch "$url.sha256" "$tmp/$archive.sha256" 2>/dev/null; then
+  want="$(cut -d' ' -f1 <"$tmp/$archive.sha256")"
+  got="$(sha256_of "$tmp/$archive")"
+  [ "$want" = "$got" ] || fail "checksum mismatch for $archive (expected $want, got $got)"
+else
+  echo "meebis: warning: no published checksum for $archive — installing unverified" >&2
+fi
+
+# The archive wraps everything in a meebis-<triple>/ directory; strip it so the
+# binary lands directly in the download path.
+mkdir -p "$dest"
+tar -xJf "$tmp/$archive" -C "$dest" --strip-components=1 ||
+  fail "could not extract $archive (is xz support available to tar?)"
+
+[ -f "$dest/meebis" ] || fail "the archive did not contain a meebis binary"

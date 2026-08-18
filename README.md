@@ -44,6 +44,18 @@ cargo binstall meebis           # prebuilt binary, no compile (needs cargo-binst
 cargo install meebis            # build from source (crates.io)
 ```
 
+**mise** or **asdf** — pin a version per project, alongside your other tools:
+
+```sh
+mise use github:mileszim/meebis@0.12.0        # mise, no plugin needed
+
+asdf plugin add meebis https://github.com/mileszim/meebis.git
+asdf install meebis 0.12.0                    # asdf
+```
+
+See [mise & asdf](#mise--asdf) for `.tool-versions`, `mise.toml`, and the
+`@latest` caveat.
+
 **Devcontainer** — add it to `devcontainer.json`, see [Devcontainer](#devcontainer):
 
 ```json
@@ -436,6 +448,61 @@ docker run --rm -p 6379:6379 -v "$PWD/.meebis:/data" \
 `docker stop` sends `SIGTERM`, which meebis catches and snapshots on; `docker
 kill` does not. See [Snapshots](#snapshots-dumpfile) for what that file is and
 is not.
+
+## mise & asdf
+
+If your project already pins its toolchain, meebis can be one more line in it —
+which is the natural fit, since the audience for a per-worktree Redis is largely
+the audience already running a version manager.
+
+### mise
+
+No plugin required: mise can install straight from the release assets.
+
+```sh
+mise use github:mileszim/meebis@0.12.0
+```
+
+```toml
+# mise.toml
+[tools]
+"github:mileszim/meebis" = "0.12.0"
+```
+
+`@latest` also works, with one wrinkle worth knowing: mise's
+`minimum_release_age` setting hides releases newer than a few days, so
+immediately after a release `@latest` still resolves to the previous one. Pin
+the version, or clear the setting, if that matters to you.
+
+meebis also hosts an asdf plugin (below) that mise can use instead, if you would
+rather refer to it by bare name:
+
+```sh
+mise plugin add meebis https://github.com/mileszim/meebis.git
+mise use meebis@0.12.0
+```
+
+### asdf
+
+The plugin lives in this repository rather than a separate `asdf-meebis` one, so
+there is nothing extra to trust:
+
+```sh
+asdf plugin add meebis https://github.com/mileszim/meebis.git
+asdf install meebis 0.12.0
+asdf set meebis 0.12.0          # writes .tool-versions
+```
+
+```
+# .tool-versions
+meebis 0.12.0
+```
+
+It installs the prebuilt binary for your platform (macOS and Linux, arm64 and
+x86_64) and checks it against the `sha256` published beside it. `asdf install
+meebis latest` picks the newest release.
+
+Neither route builds from source, so neither needs a Rust toolchain.
 
 ## Devcontainer
 
