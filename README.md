@@ -31,6 +31,21 @@ It is *not* a Redis replacement for production. It's a dev tool.
 brew install mileszim/tap/meebis
 ```
 
+**npm** — nothing to install if you only want to run one:
+
+```sh
+npx meebis                      # fetch and run, no install step
+npm install --save-dev meebis   # or pin it into a project
+```
+
+Handy as a `package.json` script, so a checkout comes with its own Redis:
+
+```json
+"scripts": {
+  "redis": "meebis --port 6400"
+}
+```
+
 **Shell installer** (macOS & Linux) — downloads the right prebuilt binary for your platform:
 
 ```sh
@@ -70,7 +85,8 @@ docker run --rm -p 6379:6379 ghcr.io/mileszim/meebis
 
 **Prebuilt binaries** for macOS and Linux (arm64 & x86_64) are attached to every
 [release](https://github.com/mileszim/meebis/releases/latest) as `.tar.xz`
-archives, with `sha256` checksums.
+archives, with `sha256` checksums. The shell and npm installers both just fetch
+the right one of these — there is no compile step and no build toolchain needed.
 
 **From a local checkout**:
 
