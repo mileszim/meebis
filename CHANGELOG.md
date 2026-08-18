@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/mileszim/meebis/compare/v0.11.0...v0.12.0) (2026-08-18)
+
+
+### Features
+
+* ship a Claude Code plugin for per-session instances ([#23](https://github.com/mileszim/meebis/issues/23)) ([78ca731](https://github.com/mileszim/meebis/commit/78ca7314a85716322a41241d338de3f5895143b2))
+
 ## [0.11.0](https://github.com/mileszim/meebis/compare/v0.10.0...v0.11.0) (2026-08-18)
 
 
